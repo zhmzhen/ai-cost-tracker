@@ -1,150 +1,68 @@
 # AI Cost Tracker for Cursor
 
-Show **Cursor** AI usage cost, quota, and token details in the status bar — companion to the [`tt` (token-tracker)](https://github.com/zhmzhen/token-tracker) Python CLI.
+**Install and forget.** Shows your real Cursor billing cycle cost and quota right in the status bar — no extra CLI, no PATH gymnastics, no per-environment setup.
 
-Current scope: this extension is intentionally Cursor-only. The underlying `tt`
-CLI can detect other agents, but this IDE extension is published and tested for
-Cursor's server-side monthly cost/quota data.
+![status bar showing Cursor: $344.27 · 34% used](https://raw.githubusercontent.com/zhmzhen/ai-cost-tracker/main/media/statusbar.png)
 
-```
-┌──────────┐   periodic   ┌─────────────────────┐   poll   ┌────────────┐
-│  tt CLI  │─────────────▶│ ~/.tt/status.json   │◀─────────│ AI Cost    │
-│ (python) │   write json │ (schema version=2)  │   read   │ (this ext) │
-└──────────┘              └─────────────────────┘          └────────────┘
-```
+## What it does
 
-## Architecture
+One status bar item, always visible:
 
-The extension never opens Cursor's own SQLite directly; that's the Python CLI's job. The two pieces share **one data contract**: the JSON file at `~/.tt/status.json` (or `%APPDATA%\.tt\status.json` on Windows), produced by `tt status`.
+- Current billing cycle **usage cost** in USD (the same number you see on cursor.com)
+- **Quota %** for individual or team-pool plans (omitted on unlimited plans)
+- Hover for the full breakdown: cycle dates, per-model cost, quota numbers, membership tier
+- Click for an immediate refresh
 
-The extension is declared as a **workspace extension**. In a normal local window it runs on the local machine; in Remote-WSL / Remote-SSH it runs inside that remote extension host. Use the same VSIX everywhere, but install `tt` where that specific extension host can execute it.
+It reuses your existing Cursor login (the session token already on disk) and talks only to `https://cursor.com`. There is nothing to sign up for, nothing to paste, no API key.
 
-`AI Cost Tracker for Cursor` simply:
+## Install
 
-1. Reads `~/.tt/status.json` on activation (zero-wait initial render).
-2. Periodically spawns `tt status --json` (configurable interval) to refresh.
-3. Renders one configurable line in the status bar; full data in the hover tooltip.
-4. Click the status bar item to cycle between detected agents (Cursor / Claude Code / Codex / ...).
+In Cursor or VS Code: **Extensions** → search for **AI Cost Tracker for Cursor** → **Install**. That's it.
 
-This means you get the same numbers in the IDE as on the CLI — there's only one source of truth.
+Alternatively, install the VSIX file by hand: **Cmd/Ctrl + Shift + P** → **Extensions: Install from VSIX…**.
 
-## Security / Privacy
-
-No API key setup is required. The companion `tt` CLI automatically reuses the
-local Cursor login session by reading Cursor's `cursorAuth/accessToken` from the
-local Cursor state database, then uses it only to call official Cursor endpoints
-on `https://cursor.com` for usage and quota data.
-
-- This extension does not read Cursor's session token directly; it only spawns `tt status --json`.
-- The Cursor session token is never written to `~/.tt/status.json`.
-- The token is never printed by `tt cursor-debug` or `TT_CURSOR_DEBUG_API=1`.
-- No token or usage data is uploaded to third-party servers; there is no telemetry.
-- The shared snapshot contains only aggregated display data such as cost, tokens, quota, and model breakdown.
-- Use `TT_CURSOR_NO_API=1 tt status` to disable Cursor server-side API calls entirely.
-
-## Requirements
-
-- Cursor (or VS Code) ≥ 1.85.
-- `tt` (token-tracker) Python CLI installed in the current extension host and visible on `PATH`. Install with:
-
-  ```bash
-  pip install token-tracker
-  tt status   # warms the cache, also confirms tt is reachable
-  ```
-
-  If `tt` lives somewhere off-PATH, set `aiCostTracker.cliPath` in Settings. The extension also probes common fallback locations: `~/.local/bin`, `/usr/local/bin`, `/opt/homebrew/bin`, and Windows Python user-script directories such as `%APPDATA%\Python\Python311\Scripts`.
-
-Remote-WSL / Remote-SSH note: the extension host often has a minimal `PATH`. If `tt` was installed to `~/.local/bin`, either symlink it to `/usr/local/bin/tt` or set `aiCostTracker.cliPath` to the absolute path in that remote environment.
+The extension runs in the active extension host. In a local window it runs locally; in Remote-WSL or Remote-SSH it runs in the remote host — both work without any extra configuration, because the extension reads Cursor's own state database in-process (via [sql.js](https://github.com/sql-js/sql.js) compiled to WebAssembly).
 
 ## Settings
 
+Three optional knobs. All have sensible defaults; you should never need to touch them.
+
 | Key | Default | Description |
 |---|---|---|
-| `aiCostTracker.statusFile` | `""` (= CLI default) | Path to the snapshot file written by `tt status` in the current extension host. |
-| `aiCostTracker.cliPath` | `tt` | How to invoke the CLI in the current extension host. Use absolute path if needed. |
-| `aiCostTracker.refreshIntervalSec` | `30` | How often to spawn `tt status` to refresh. |
-| `aiCostTracker.staleAfterSec` | `600` | After this many seconds, status bar shows a stale-warning indicator. |
-| `aiCostTracker.preferredAgent` | `cursor` | Currently intended to display Cursor. |
-| `aiCostTracker.format` | `$(symbol-event) ${agent}: ${primaryCost}${primaryQuota}` | Status bar template. |
+| `aiCostTracker.refreshIntervalSec` | `60` | How often to refresh from cursor.com, in seconds. |
+| `aiCostTracker.staleAfterSec` | `600` | After this many seconds with no successful refresh, the status bar shows a stale-warning indicator. |
+| `aiCostTracker.format` | `$(symbol-event) Cursor: ${cost}${quota}` | Status bar template. |
 
-Available format vars: `${agent}`, `${model}`, `${primaryCost}`, `${primaryQuota}`, `${monthCost}`, `${monthTokens}`, `${monthQuotaPct}`, `${todayTokens}`, `${todayCost}`, `${allTokens}`, `${allCost}`, `${quota}`, `${quota5h}`, `${quota7d}`.
+Template variables: `${cost}`, `${tokens}`, `${quota}`, `${quotaPct}`, `${membership}`.
 
 ## Commands
 
 | Command | Action |
 |---|---|
-| `AI Cost Tracker: Refresh now` | Force a `tt status` spawn immediately. |
-| `AI Cost Tracker: Open full dashboard in terminal (`tt`)` | Opens an integrated terminal and runs `tt`. |
-| `AI Cost Tracker: Cycle visible agent` | Same as clicking the status bar item. |
-| `AI Cost Tracker: Show raw status JSON` | Open the current snapshot in a JSON editor (debug). |
+| `AI Cost Tracker: Refresh now` | Force an immediate refresh. |
+| `AI Cost Tracker: Show raw cycle data (JSON)` | Open the latest fetched summary as JSON. |
 
-## Build
+## Privacy
+
+- The extension reads `cursorAuth/accessToken` only from Cursor's own local `state.vscdb` (the file Cursor itself wrote).
+- The token never leaves your machine except as a `Cookie` header to `https://cursor.com`, exactly the way the cursor.com web client uses it.
+- The token is **not** stored in any file the extension creates, not logged, and not sent to any third party.
+- No telemetry.
+
+## Why no Python CLI?
+
+Earlier 0.x versions depended on a Python `tt` CLI that the user had to install separately in each extension host (Windows, WSL, SSH). That was fragile. Starting with 0.4.0, all data fetching happens directly inside the extension in pure Node + WebAssembly. The companion [`token-tracker`](https://github.com/zhmzhen/token-tracker) Python CLI still exists for command-line users who want richer per-day reports across Claude Code / Codex / Cursor, but the extension no longer requires it.
+
+## Build from source
 
 ```bash
 npm install
-npm run compile      # tsc → out/
-npm run package      # → dist/ai-cost-tracker-0.3.3.vsix
-```
-
-Then in Cursor: **Cmd/Ctrl + Shift + P** → **Extensions: Install from VSIX…** → pick the `.vsix`.
-
-## Publishing / Auto update
-
-Registration and publishing for a free extension are normally free: VS Code
-Marketplace needs a publisher id (for this extension: `zhmzhen`) and an Azure
-DevOps PAT; Open VSX needs an Open VSX token.
-
-Auto update only works after publishing under a stable extension id such as
-`zhmzhen.ai-cost-tracker`. Sideloaded `.vsix` files do not reliably auto-update, and
-local / Remote-WSL / Remote-SSH windows are different extension hosts, so the
-same VSIX may need to be installed once per host.
-
-## Data contract (schema version 2)
-
-```jsonc
-{
-  "version": 2,
-  "updated_at": "2026-05-12T08:30:00+00:00",
-  "tt_version": "0.3.1",
-  "agents": [
-    {
-      "id": "cursor",
-      "name": "Cursor",
-      "model": "claude-4.5-sonnet-thinking",
-      "today":    { "tokens": 2200000, "input_tokens": 2086000, "output_tokens": 113900,
-                    "cost_usd": 7.89, "messages": 19, "sessions": 1 },
-      "all_time": { "tokens": 8400000, "input_tokens": 7776748, "output_tokens": 595147,
-                    "cost_usd": 34.69, "messages": 99, "sessions": 20 },
-      "current_month": {
-        "cost_usd": 243.68,
-        "input_tokens": 4394021,
-        "output_tokens": 1468606,
-        "cache_write_tokens": 8235907,
-        "cache_read_tokens": 278049468,
-        "cycle_start": "2026-05-01T00:00:00.000Z",
-        "cycle_end": "2026-06-01T00:00:00.000Z",
-        "membership": "enterprise",
-        "is_unlimited": false,
-        "individual_quota": {
-          "enabled": true,
-          "used": 24368,
-          "limit": 100000,
-          "remaining": 75632,
-          "used_pct": 24.37
-        },
-        "team_quota_pooled": null,
-        "by_model": [],
-        "fetched_at": "2026-05-12T08:30:00+00:00"
-      },
-      "rate_limits": null
-    }
-  ]
-}
+npm run package      # → dist/ai-cost-tracker-0.4.0.vsix
 ```
 
 ## License
 
-MIT. Companion to `token-tracker`.
+MIT.
 
 ## Acknowledgements
 

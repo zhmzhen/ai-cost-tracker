@@ -1,0 +1,91 @@
+{
+  "name": "ai-cost-tracker",
+  "displayName": "AI Cost Tracker for Cursor",
+  "description": "Zero-config status-bar widget that shows Cursor monthly cost and quota. Install and forget — no extra CLI, no PATH setup.",
+  "version": "0.4.0",
+  "publisher": "zhmzhen",
+  "author": {
+    "name": "zhmzhen"
+  },
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "cursor",
+    "cost",
+    "usage",
+    "quota",
+    "statusbar",
+    "ai",
+    "billing",
+    "token"
+  ],
+  "main": "./out/extension.js",
+  "extensionKind": [
+    "workspace",
+    "ui"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "AI Cost Tracker",
+      "properties": {
+        "aiCostTracker.refreshIntervalSec": {
+          "type": "number",
+          "default": 60,
+          "minimum": 5,
+          "description": "How often to refresh from Cursor's dashboard API, in seconds."
+        },
+        "aiCostTracker.staleAfterSec": {
+          "type": "number",
+          "default": 600,
+          "minimum": 30,
+          "description": "If no successful refresh in this many seconds, the status bar shows a warning indicator."
+        },
+        "aiCostTracker.format": {
+          "type": "string",
+          "default": "$(symbol-event) Cursor: ${cost}${quota}",
+          "markdownDescription": "Status bar template. Available variables:\n\n- `${cost}` — current billing cycle usage cost, e.g. `$344.27`\n- `${tokens}` — total tokens this cycle (input+output+cache)\n- `${quota}` — best quota fragment, e.g. ` · 34% used`; empty if no quota applies\n- `${quotaPct}` — quota percent, e.g. `34%`\n- `${membership}` — Cursor membership tier"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "aiCostTracker.refresh",
+        "title": "AI Cost Tracker: Refresh now"
+      },
+      {
+        "command": "aiCostTracker.showDetails",
+        "title": "AI Cost Tracker: Show raw cycle data (JSON)"
+      }
+    ]
+  },
+  "scripts": {
+    "copy-wasm": "node -e \"const fs=require('fs'),p=require('path'),src=require.resolve('sql.js/dist/sql-wasm.wasm'),dst=p.join(__dirname,'media','sql-wasm.wasm');fs.mkdirSync(p.dirname(dst),{recursive:true});fs.copyFileSync(src,dst);console.log('copied',src,'->',dst);\"",
+    "vscode:prepublish": "npm run copy-wasm && npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "npm run copy-wasm && npm run compile && vsce package --out dist/"
+  },
+  "dependencies": {
+    "sql.js": "^1.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/sql.js": "^1.4.9",
+    "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "^3.2.0",
+    "typescript": "^5.4.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zhmzhen/ai-cost-tracker"
+  }
+}
