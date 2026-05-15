@@ -264,6 +264,81 @@ export function chunkedReadFile(
   }
 }
 
+/**
+ * Default chunk size for streaming scans of the multi-GiB state DB. 64 MiB
+ * keeps each chunk well under V8's typed-array limit while reading in
+ * roughly one disk seek's worth of data on a spinning-platter NTFS volume.
+ * Exported so call sites elsewhere ({@link "./cursor".scanFileForJwt},
+ * {@link "./diagnostics".runTokenProbe}) share the same tunable.
+ */
+export const SCAN_CHUNK_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Overlap between consecutive {@link forEachFileChunk} windows. 8 KiB is
+ * enough to never split a ``cursorAuth/accessToken``+JWT match across a
+ * chunk boundary (the high-precision matcher in
+ * {@link "./cursor".scanRawForJwt} only accepts a JWT within 4096 bytes of
+ * the key, and the key itself is ~22 bytes). Keep generous: a missed
+ * token here regresses to ``session token not found``.
+ */
+export const SCAN_OVERLAP_BYTES = 8 * 1024;
+
+/**
+ * Yield latin1-decoded chunks of file ``p`` to ``cb``, with ``overlapBytes``
+ * of overlap between chunks so matches are never split. Stops when ``cb``
+ * returns true or EOF is reached.
+ *
+ * ``chunkBytes`` must be strictly greater than ``overlapBytes``; otherwise
+ * the loop cannot make forward progress.
+ */
+export function forEachFileChunk(
+  p: string,
+  chunkBytes: number,
+  overlapBytes: number,
+  cb: (text: string) => boolean,
+): { error: string | null } {
+  if (chunkBytes <= overlapBytes) {
+    return {
+      error: `chunkBytes (${chunkBytes}) must be > overlapBytes (${overlapBytes})`,
+    };
+  }
+  let fd: number | null = null;
+  try {
+    const st = fs.statSync(p);
+    const size = st.size;
+    if (size === 0) return { error: null };
+
+    fd = fs.openSync(p, "r");
+    const buf = Buffer.allocUnsafe(chunkBytes);
+    let offset = 0;
+    while (offset < size) {
+      const want = Math.min(chunkBytes, size - offset);
+      const got = fs.readSync(fd, buf, 0, want, offset);
+      if (got <= 0) break;
+
+      const chunk = buf.subarray(0, got);
+      const stop = cb(chunk.toString("latin1"));
+      if (stop) break;
+
+      if (got < chunkBytes) break; // EOF
+
+      offset += got - overlapBytes;
+      if (offset < 0) offset = 0;
+    }
+    return { error: null };
+  } catch (e) {
+    return { error: errnoOf(e) };
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // ignored
+      }
+    }
+  }
+}
+
 /** Best-effort read; returns null on any failure (used for sidecar files). */
 export function readIfExists(p: string): Buffer | null {
   try {

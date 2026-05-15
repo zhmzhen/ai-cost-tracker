@@ -2,6 +2,39 @@
 
 All notable changes to AI Cost Tracker for Cursor are documented here.
 
+## 0.4.14
+
+### Fixed
+
+- When `state.vscdb` is larger than 2 GiB, V8 can fail before SQLite is
+  even involved with `Array buffer allocation failed`: the 0.4.13 chunked
+  reader avoided libuv's single-read cap, but still needed one contiguous
+  destination `Buffer`. The token lookup now falls back to a streaming
+  byte-scan of the main DB file on that exact error, reading 64 MiB windows
+  with 8 KiB overlap so `cursorAuth/accessToken` + JWT matches are not
+  split across chunk boundaries.
+- If `sql.js` cannot open or query the bytes after they were read
+  successfully, token lookup now tries an in-memory byte-scan before
+  returning "no access token". This covers both wasm heap allocation
+  failures and corrupt/non-SQLite buffers where `new SQL.Database(...)`
+  succeeds but `db.exec(...)` throws later.
+- Raw main-DB byte-scan recoveries are now reported as
+  `source=main-scan`, instead of being mislabeled as `source=sql`, so logs
+  distinguish canonical SQL success from fallback recovery.
+- The diagnostic probe now imports the streaming chunk scanner correctly
+  and shares the same scan constants as the token lookup path.
+
+### Tests
+
+- Added streaming scanner coverage for small files, empty/missing files,
+  cross-chunk-boundary matches, Strategy 2 JWT-only recovery, callback
+  short-circuiting, and invalid non-progressing chunk parameters.
+- Added an end-to-end `readAccessTokenDetailed` regression that locks down
+  the `db.exec(...)` failure path and verifies `source=main-scan`.
+- Added an IDE-only `test/tsconfig.json` so TypeScript language service
+  diagnostics under `test/` resolve Node/Vitest types without changing the
+  production compile output.
+
 ## 0.4.13
 
 ### Fixed

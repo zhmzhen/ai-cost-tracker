@@ -34,10 +34,13 @@ import {
 } from "./diagnostics";
 import { type AccessToken, parseJwtToToken } from "./jwt";
 import {
+  SCAN_CHUNK_BYTES,
+  SCAN_OVERLAP_BYTES,
   candidateUserDirs,
   chunkedReadFile,
   errnoOf,
   findStateDb,
+  forEachFileChunk,
   loadSqlJs,
   readDbWithFallback,
   readIfExists,
@@ -53,9 +56,12 @@ export type {
   Quota,
 } from "./apiTypes";
 export {
+  SCAN_CHUNK_BYTES,
+  SCAN_OVERLAP_BYTES,
   candidateUserDirs,
   chunkedReadFile,
   findStateDb,
+  forEachFileChunk,
   readDbWithFallback,
   setWasmDirectory,
 };
@@ -92,8 +98,11 @@ export interface ReadAccessTokenResult {
   // Indicates how the token was ultimately recovered, for the diagnostics
   // log. "sql" = found via sql.js SELECT against the main DB file. "wal" =
   // recovered by scanning the SQLite WAL sidecar because the SELECT returned
-  // no rows. "none" = no token was found by either path.
-  source: "sql" | "wal" | "none";
+  // no rows. "main-scan" = recovered by a byte-scan of the main DB file
+  // (used when the file is too large for sql.js to load, or when sql.js
+  // failed to open the in-memory buffer). "none" = no token was found by
+  // any path.
+  source: "sql" | "wal" | "main-scan" | "none";
   // errno from readFileSync(dbPath) when it failed, e.g. "EBUSY" or
   // "EACCES" on Windows when Cursor holds an exclusive lock. We were
   // previously swallowing this and returning source=none, which made the
@@ -127,6 +136,21 @@ export async function readAccessTokenDetailed(
 ): Promise<ReadAccessTokenResult> {
   const readRes = readDbWithFallback(dbPath);
   if (!readRes.buf) {
+    // If the DB is too large to fit in a Node Buffer, fall back to a
+    // streaming byte-scan of the main file. This is slower than SQL but
+    // survives the 2 GiB+ databases that some users have.
+    if (readRes.error === "Array buffer allocation failed") {
+      const tok = scanFileForJwt(dbPath);
+      if (tok) {
+        return {
+          token: tok,
+          cursorAuthKeys: [],
+          source: "main-scan",
+          readError: "Array buffer allocation failed (used streaming scan)",
+        };
+      }
+    }
+
     return {
       token: null,
       cursorAuthKeys: [],
@@ -158,6 +182,7 @@ export async function readAccessTokenDetailed(
   }
 
   if (db) {
+    let execError: string | undefined;
     try {
       // Pull every key under cursorAuth/* so we can both pick the right one
       // and emit a key list to the diagnostic log when nothing matched.
@@ -165,10 +190,24 @@ export async function readAccessTokenDetailed(
       // `cursorAuth/accessToken`, but newer builds may use a slightly
       // different key shape; scanning the prefix lets us survive that
       // without another release.
-      const res = db.exec(
-        "SELECT key, value FROM ItemTable WHERE key LIKE 'cursorAuth%'",
-      );
-      if (res.length) {
+      //
+      // ``db.exec`` itself can throw on a corrupt or non-SQLite buffer
+      // (sql.js does not always reject those in the ``new Database()``
+      // constructor). Catch that case and treat it the same way as
+      // ``new SQL.Database`` failing: drop into the byte-scan fallback
+      // below instead of bubbling out of ``readAccessTokenDetailed``.
+      let res:
+        | ReturnType<Database["exec"]>
+        | undefined;
+      try {
+        res = db.exec(
+          "SELECT key, value FROM ItemTable WHERE key LIKE 'cursorAuth%'",
+        );
+      } catch (e) {
+        execError = errnoOf(e);
+        res = undefined;
+      }
+      if (res && res.length) {
         const rows = res[0].values as Array<[unknown, unknown]>;
         for (const [k] of rows) {
           if (typeof k === "string") sqlKeys.push(k);
@@ -196,8 +235,10 @@ export async function readAccessTokenDetailed(
         }
       }
 
-      // Canonical SELECT yielded no usable token. Collect probe data so the
-      // next release has something to work with instead of another guess.
+      // Canonical SELECT yielded no usable token (or threw). Collect
+      // probe data on a best-effort basis so the next release has
+      // something to work with instead of another guess. Each helper
+      // already swallows its own exceptions.
       tables = listTables(db);
       suspectKeys = listSuspectItemTableKeys(db);
       diskKvSuspectKeys = listSuspectKeysInTable(db, "cursorDiskKV", "key");
@@ -205,6 +246,35 @@ export async function readAccessTokenDetailed(
       itemTableRows = countItemTableRows(db);
     } finally {
       db.close();
+    }
+    // If the SELECT threw (corrupt DB / not-actually-SQLite buffer),
+    // try the byte-scan fallback before we declare the token missing.
+    // ``sqlOpenError`` carries the message so a "source=none" line is
+    // still attributable to the SQL layer, not the WAL layer.
+    if (execError) {
+      const tok = scanRawForJwt(buf);
+      if (tok) {
+        return {
+          token: tok,
+          cursorAuthKeys: sqlKeys,
+          source: "main-scan",
+          sqlOpenError: `${execError} (used byte-scan fallback)`,
+        };
+      }
+      sqlOpenError = execError;
+    }
+  } else {
+    // sql.js failed to open the database (likely because the WASM heap
+    // allocation failed for a multi-GiB file). Fall back to a byte-scan of
+    // the main DB buffer we already have in memory.
+    const tok = scanRawForJwt(buf);
+    if (tok) {
+      return {
+        token: tok,
+        cursorAuthKeys: [],
+        source: "main-scan",
+        sqlOpenError: `${sqlOpenError ?? "unknown"} (used byte-scan fallback)`,
+      };
     }
   }
 
@@ -281,15 +351,33 @@ export async function readAccessTokenDetailed(
  * can exceed that several times over; even though we only call this on the
  * WAL sidecar today, keeping the routine chunk-safe avoids surprises if a
  * future caller hands it a larger buffer.
+ *
+ * Chunk/overlap tunables ``SCAN_CHUNK_BYTES`` and ``SCAN_OVERLAP_BYTES``
+ * live in ``./stateDb`` so the file-streaming scan
+ * ({@link scanFileForJwt}, used when a multi-GiB DB cannot be loaded into
+ * memory at all) and the in-memory scan share one source of truth.
  */
-const SCAN_CHUNK_BYTES = 64 * 1024 * 1024;
-// 8 KB overlap: SQLite pages are at most 64 KB; a JWT plus the
-// `cursorAuth/accessToken` key prefix is well under 8 KB, so this is enough
-// to never split a match across chunks. Keep the constant generous because
-// a missed token here means a regression to "session token not found".
-const SCAN_OVERLAP_BYTES = 8 * 1024;
-
 export function scanRawForJwt(bytes: Buffer): AccessToken | null {
+  return scanCommon((cb) => forEachChunk(bytes, cb));
+}
+
+/**
+ * Streaming version of ``scanRawForJwt`` for files that are too large to
+ * fit in a single Node Buffer. ``chunkBytes`` / ``overlapBytes`` default
+ * to the module-level constants, and may be overridden by tests to keep
+ * cross-chunk-boundary cases fast.
+ */
+export function scanFileForJwt(
+  p: string,
+  chunkBytes: number = SCAN_CHUNK_BYTES,
+  overlapBytes: number = SCAN_OVERLAP_BYTES,
+): AccessToken | null {
+  return scanCommon((cb) => forEachFileChunk(p, chunkBytes, overlapBytes, cb));
+}
+
+function scanCommon(
+  iterate: (cb: (text: string) => boolean) => void,
+): AccessToken | null {
   const jwtCharset = "A-Za-z0-9_\\-";
   const jwtRe = new RegExp(
     `[${jwtCharset}]+\\.[${jwtCharset}]+\\.[${jwtCharset}]+`,
@@ -302,7 +390,7 @@ export function scanRawForJwt(bytes: Buffer): AccessToken | null {
   // payload, so the value is normally within a few hundred bytes of the key
   // string. This is the high-precision path; we run it first.
   let stash: AccessToken | null = null;
-  forEachChunk(bytes, (text) => {
+  iterate((text) => {
     keyRe.lastIndex = 0;
     let keyMatch: RegExpExecArray | null;
     while ((keyMatch = keyRe.exec(text)) !== null) {
@@ -324,7 +412,7 @@ export function scanRawForJwt(bytes: Buffer): AccessToken | null {
   // page boundary. Walk every JWT-shaped run and accept the first one whose
   // payload decodes as a Cursor access token (has `sub` and a future-ish
   // `exp`). Higher false-positive risk, so it is only used as fallback.
-  forEachChunk(bytes, (text) => {
+  iterate((text) => {
     jwtRe.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = jwtRe.exec(text)) !== null) {
@@ -389,8 +477,10 @@ export interface AcquireDiagnostics {
   // Keys observed under `cursorAuth*` in the DB (no values).
   cursorAuthKeys: string[];
   // How the token was ultimately recovered: "sql" path (the normal one),
-  // "wal" path (WAL sidecar byte-scan fallback), or "none".
-  source: "sql" | "wal" | "none";
+  // "wal" path (WAL sidecar byte-scan fallback), "main-scan" (streaming or
+  // in-memory byte scan of the main DB when sql.js could not load it), or
+  // "none".
+  source: "sql" | "wal" | "main-scan" | "none";
   // errno from the readFileSync against state.vscdb, if it failed.
   // Threaded straight from ReadAccessTokenResult so the user-facing log
   // makes "the DB is locked" distinguishable from "the DB has no auth".

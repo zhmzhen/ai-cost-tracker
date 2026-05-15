@@ -1,0 +1,20 @@
+{
+  // IDE-only tsconfig: gives the TypeScript language service @types/node
+  // and module resolution for files under test/. The actual test run goes
+  // through vitest (Vite + esbuild), which does not consult this file.
+  // The production build (`npm run compile` -> `tsc -p ./`) keeps using
+  // the root tsconfig.json and emits only src/ into out/.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    // Tests sit outside src/, so widen rootDir to the project root.
+    "rootDir": "..",
+    // Belt-and-suspenders: this config exists only to feed the IDE; it
+    // must never produce build artifacts.
+    "noEmit": true,
+    // Vitest matchers and beforeEach scopes sometimes legitimately use
+    // throwaway bindings; do not fail the IDE on those.
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": ["./**/*.ts", "../src/**/*.ts"]
+}

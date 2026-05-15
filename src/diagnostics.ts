@@ -24,8 +24,11 @@ import { type Database } from "sql.js";
 
 import { parseJwtToToken } from "./jwt";
 import {
+  SCAN_CHUNK_BYTES,
+  SCAN_OVERLAP_BYTES,
   candidateUserDirs,
   findStateDb,
+  forEachFileChunk,
   loadSqlJs,
   readDbWithFallback,
   readIfExists,
@@ -345,7 +348,7 @@ function statCandidateDbs(): CandidateDbStat[] {
 
 export function buildProbe(
   dbPath: string,
-  mainBytes: Buffer,
+  mainBytes: Buffer | null,
   walBytes: Buffer | null,
   tables: string[],
   suspectKeys: string[],
@@ -395,6 +398,33 @@ export async function runTokenProbe(): Promise<
   if (!dbPath) return null;
   const readRes = readDbWithFallback(dbPath);
   if (!readRes.buf) {
+    // If the DB is too large to fit in a Node Buffer, try a streaming
+    // scan for the mainDbJwtCount/samplePrefix.
+    let mainDbJwtCount = 0;
+    let mainDbJwtSamplePrefix: string | null = null;
+    if (readRes.error === "Array buffer allocation failed") {
+      forEachFileChunk(
+        dbPath,
+        SCAN_CHUNK_BYTES,
+        SCAN_OVERLAP_BYTES,
+        (text) => {
+          const jwtCharset = "A-Za-z0-9_\\-";
+          const re = new RegExp(
+            `eyJ[${jwtCharset}]{8,}\\.[${jwtCharset}]{10,}\\.[${jwtCharset}]{10,}`,
+            "g",
+          );
+          let m: RegExpExecArray | null;
+          while ((m = re.exec(text)) !== null) {
+            mainDbJwtCount++;
+            if (mainDbJwtSamplePrefix === null)
+              mainDbJwtSamplePrefix = m[0].slice(0, 12);
+            if (mainDbJwtCount >= 100) return true;
+          }
+          return false;
+        },
+      );
+    }
+
     // Return a stub so the caller can still log readError + candidateDbStats
     // instead of just "nothing to probe", which was the unhelpful state on
     // the emily machine.
@@ -409,8 +439,8 @@ export async function runTokenProbe(): Promise<
       itemTableSuspectKeys: [],
       cursorDiskKVSuspectKeys: [],
       cursorDiskKVHasJwt: false,
-      mainDbJwtCount: 0,
-      mainDbJwtSamplePrefix: null,
+      mainDbJwtCount,
+      mainDbJwtSamplePrefix,
       walJwtCount: 0,
       walJwtSamplePrefix: null,
       storageJsonKeys: readStorageJsonKeys(dbPath),

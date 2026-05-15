@@ -158,4 +158,32 @@ describe("readAccessTokenDetailed", () => {
 
     expect(res.probe?.mainDbJwtCount).toBe(0);
   });
+
+  // Regression for the emily incident: the DB is so large that sql.js
+  // cannot allocate its wasm heap, but the buffer itself loaded fine.
+  // The byte-scan fallback should still recover the token from memory
+  // and the result must be labelled ``source=main-scan`` so the log
+  // says "we used the fallback path", not "the canonical SELECT
+  // worked". We simulate the sql.js failure by handing in a buffer
+  // that loads as a Buffer but is not a valid SQLite container.
+  it("falls back to source=main-scan when sql.js cannot open the buffer but the bytes contain a token", async () => {
+    const p = path.join(tmp, "not-sqlite.vscdb");
+    // Bytes that pass ``readDbWithFallback`` (any non-empty file does)
+    // but are not a valid SQLite database, so ``new SQL.Database(buf)``
+    // throws. The scanner then walks the buffer and finds the key+JWT.
+    fs.writeFileSync(
+      p,
+      Buffer.concat([
+        Buffer.from("not a sqlite header, but readable bytes ".repeat(32)),
+        Buffer.from(`\x00cursorAuth/accessToken\x00${jwt}\x00`),
+        Buffer.from("trailing-padding".repeat(16)),
+      ]),
+    );
+
+    const res = await readAccessTokenDetailed(p);
+
+    expect(res.source).toBe("main-scan");
+    expect(res.token?.token).toBe(jwt);
+    expect(res.sqlOpenError).toMatch(/byte-scan fallback/);
+  });
 });
