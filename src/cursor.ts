@@ -231,6 +231,10 @@ export interface ReadAccessTokenResult {
   // failure indistinguishable from "DB has no cursorAuth rows" — both
   // showed up as cursorAuthKeys=[]. Always log this when set.
   readError?: string;
+  // Set when ``new SQL.Database(buf)`` threw — typically because the
+  // multi-GiB Cursor DB exceeds the sql.js wasm heap. Captured so a
+  // "source=none" with a healthy `readError=null` is still attributable.
+  sqlOpenError?: string;
   // Extra signal collected when the canonical lookup fails. These exist
   // because newer Cursor builds have been observed to move auth state out
   // of `ItemTable / cursorAuth/*` — without this we have no way to tell
@@ -316,9 +320,16 @@ export async function readAccessTokenDetailed(
   let diskKvSuspectKeys: string[] = [];
   let diskKvHasJwt = false;
   let itemTableRows: number | null = null;
+  let sqlOpenError: string | undefined;
   try {
     db = new SQL.Database(buf);
-  } catch {
+  } catch (e) {
+    // sql.js loads the entire buffer into its wasm heap. For multi-GiB
+    // Cursor DBs that allocation can fail with `RangeError: WebAssembly
+    // memory ...` even though Node-level Buffer.MAX_LENGTH is 4 GiB.
+    // Capture the message so the caller's "source=none" line is
+    // distinguishable from "DB read fine but auth row was missing".
+    sqlOpenError = errnoOf(e);
     db = undefined;
   }
 
@@ -409,6 +420,7 @@ export async function readAccessTokenDetailed(
     token: null,
     cursorAuthKeys: sqlKeys,
     source: "none",
+    sqlOpenError,
     probe: buildProbe(
       dbPath,
       buf,
@@ -813,57 +825,116 @@ function readIfExists(p: string): Buffer | null {
 }
 
 /**
- * Read ``state.vscdb`` (or any file) into a Buffer, falling back to a
- * snapshot copy when Windows refuses a direct read.
+ * Read ``state.vscdb`` (or any file) into a Buffer, working around two
+ * Windows-specific failure modes that ``fs.readFileSync`` does not handle
+ * out of the box.
  *
- * Cursor opens the DB with an exclusive lock on Windows; a direct
- * ``readFileSync`` against it returns EBUSY/EACCES/EPERM for some users
- * (so far observed only on certain Windows AV/EDR setups; the same path
- * reads fine for others, including all WSL hosts). The workaround is the
- * one VS Code's own user-data backup uses: ``fs.copyFile`` first into
- * the OS tmpdir, then read the copy. ``copyFile`` opens the source with
- * ``FILE_SHARE_READ`` semantics on Windows and so succeeds where a plain
- * read does not.
+ * Mode 1 — libuv 2 GiB I/O cap. The Cursor state DB can exceed 2 GiB
+ * (one observed in the wild at 2.02 GiB). Even though Node's Buffer can
+ * hold up to 4 GiB on 64-bit, libuv refuses any single read whose size
+ * is larger than INT32_MAX. ``readFileSync`` then throws
+ * ``ERR_FS_FILE_TOO_LARGE``. We work around it by opening the file
+ * ourselves and issuing repeated ``fs.readSync`` calls into chunk-sized
+ * windows of a pre-sized destination Buffer. 256 MiB per call is well
+ * under the libuv cap and keeps memory pressure bounded.
+ *
+ * Mode 2 — Cursor's exclusive lock on Windows. Some user profiles (so
+ * far seen under particular AV/EDR setups) return EBUSY/EACCES/EPERM on
+ * direct opens. The fix VS Code's own user-data backup uses is to copy
+ * via ``fs.copyFileSync`` first — ``copyFile`` requests
+ * ``FILE_SHARE_READ`` semantics and so succeeds where a plain read does
+ * not — then read the copy with the same chunked path.
  *
  * Returns ``{ buf, error: null }`` on success or ``{ buf: null, error }``
  * with the errno from the *direct* read on failure. The caller can pass
  * ``error`` straight into a log line.
  */
+const READ_CHUNK_BYTES = 256 * 1024 * 1024;
+
 function readDbWithFallback(
   p: string,
 ): { buf: Buffer | null; error: string | null; fallback: boolean } {
+  const direct = chunkedReadFile(p);
+  if (direct.buf) return { buf: direct.buf, error: null, fallback: false };
+
+  const directErr = direct.error ?? "unknown";
+  // ENOENT / EISDIR will still fail after copying — bubble them up.
+  if (
+    directErr !== "EBUSY" &&
+    directErr !== "EACCES" &&
+    directErr !== "EPERM"
+  ) {
+    return { buf: null, error: directErr, fallback: false };
+  }
+
+  // Lock-y error: copyFile to a tmp path, then read that.
+  let tmp: string | null = null;
   try {
-    return { buf: fs.readFileSync(p), error: null, fallback: false };
-  } catch (e) {
-    const directErr = errnoOf(e);
-    // Only the lock-y errors warrant a snapshot fallback. ENOENT / EISDIR
-    // would still fail after copying, so just bubble them up unchanged.
-    if (directErr !== "EBUSY" && directErr !== "EACCES" && directErr !== "EPERM") {
-      return { buf: null, error: directErr, fallback: false };
-    }
-    try {
-      const tmp = path.join(
-        os.tmpdir(),
-        `ai-cost-tracker-${process.pid}-${Date.now()}-${path.basename(p)}`,
-      );
-      fs.copyFileSync(p, tmp);
+    tmp = path.join(
+      os.tmpdir(),
+      `ai-cost-tracker-${process.pid}-${Date.now()}-${path.basename(p)}`,
+    );
+    fs.copyFileSync(p, tmp);
+    const copied = chunkedReadFile(tmp);
+    if (copied.buf) return { buf: copied.buf, error: null, fallback: true };
+    return {
+      buf: null,
+      error: `direct=${directErr},copyread=${copied.error ?? "unknown"}`,
+      fallback: false,
+    };
+  } catch (e2) {
+    return {
+      buf: null,
+      error: `direct=${directErr},copy=${errnoOf(e2)}`,
+      fallback: false,
+    };
+  } finally {
+    if (tmp) {
       try {
-        return { buf: fs.readFileSync(tmp), error: null, fallback: true };
-      } finally {
-        try {
-          fs.unlinkSync(tmp);
-        } catch {
-          // Leftover file in tmpdir is harmless; OS will reap it.
-        }
+        fs.unlinkSync(tmp);
+      } catch {
+        // Tmp leftover is harmless; OS will reap it.
       }
-    } catch (e2) {
-      // Surface both errors so the log shows whether copyFile also failed
-      // or only the original read did.
-      return {
-        buf: null,
-        error: `direct=${directErr},copy=${errnoOf(e2)}`,
-        fallback: false,
-      };
+    }
+  }
+}
+
+/**
+ * Read a file into a Buffer using chunked ``fs.readSync`` calls so a
+ * single I/O never exceeds libuv's INT32_MAX limit. Returns the errno on
+ * failure so the caller can log it.
+ */
+function chunkedReadFile(
+  p: string,
+): { buf: Buffer | null; error: string | null } {
+  let fd: number | null = null;
+  try {
+    const st = fs.statSync(p);
+    const size = st.size;
+    if (size === 0) return { buf: Buffer.alloc(0), error: null };
+    fd = fs.openSync(p, "r");
+    const out = Buffer.allocUnsafe(size);
+    let offset = 0;
+    while (offset < size) {
+      const want = Math.min(READ_CHUNK_BYTES, size - offset);
+      const got = fs.readSync(fd, out, offset, want, offset);
+      if (got <= 0) {
+        // Premature EOF: file shrank mid-read. Return what we have so
+        // the caller can decide whether the truncated bytes are useful.
+        return { buf: out.subarray(0, offset), error: null };
+      }
+      offset += got;
+    }
+    return { buf: out, error: null };
+  } catch (e) {
+    return { buf: null, error: errnoOf(e) };
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // ignored
+      }
     }
   }
 }
@@ -1166,6 +1237,9 @@ export interface AcquireDiagnostics {
   // Threaded straight from ReadAccessTokenResult so the user-facing log
   // makes "the DB is locked" distinguishable from "the DB has no auth".
   readError?: string;
+  // Error from `new SQL.Database(buf)` if that threw. See
+  // ReadAccessTokenResult.sqlOpenError.
+  sqlOpenError?: string;
   // Probe data collected when the canonical SQL lookup fails. Populated by
   // ``readAccessTokenDetailed`` and threaded through unchanged. Always safe
   // to log: it is restricted to key names, table names, and counts.
@@ -1205,6 +1279,7 @@ export async function acquireAccessTokenDetailed(): Promise<TokenResultWithDiagn
     cursorAuthKeys: detailed.cursorAuthKeys,
     source: detailed.source,
     readError: detailed.readError,
+    sqlOpenError: detailed.sqlOpenError,
     probe: detailed.probe,
   };
   if (!detailed.token) {

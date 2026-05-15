@@ -2,6 +2,26 @@
 
 All notable changes to AI Cost Tracker for Cursor are documented here.
 
+## 0.4.13
+
+### Fixed
+
+- A user's `state.vscdb` had grown to 2.02 GiB, which is just past the
+  2 GiB hard limit libuv imposes on any single `read()` call (an
+  INT32_MAX byte limit imposed regardless of Node Buffer size).
+  `fs.readFileSync` therefore threw `ERR_FS_FILE_TOO_LARGE`, and the
+  0.4.12 EBUSY-only fallback could not help because copying the file
+  to tmp and reading it back would hit the exact same limit. We now
+  read the DB with our own `fs.openSync` + chunked `fs.readSync` loop
+  (256 MiB per call, far below libuv's cap), so files larger than
+  2 GiB load correctly. The EBUSY/EACCES/EPERM copy fallback from
+  0.4.12 still applies on top of the chunked read.
+- When the DB does load but `sql.js` cannot allocate enough wasm
+  heap to hold it (a real risk on multi-GiB DBs because sql.js
+  copies the buffer into its wasm linear memory), the construction
+  error is now captured as `sqlOpenError` and logged. Without this
+  the symptom looked identical to "DB is fine, auth row is missing".
+
 ## 0.4.12
 
 ### Fixed
