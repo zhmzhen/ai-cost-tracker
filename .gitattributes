@@ -1,0 +1,10 @@
+# Normalize text files to LF in the repository regardless of host OS.
+# This keeps Markdown changelogs, READMEs, and source readable on every
+# platform and avoids spurious "whole file changed" diffs when Windows
+# editors save back with CRLF.
+* text=auto eol=lf
+
+# Binary assets are never touched.
+*.png binary
+*.wasm binary
+*.vsix binary
