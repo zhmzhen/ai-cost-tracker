@@ -225,6 +225,12 @@ export interface ReadAccessTokenResult {
   // recovered by scanning the SQLite WAL sidecar because the SELECT returned
   // no rows. "none" = no token was found by either path.
   source: "sql" | "wal" | "none";
+  // errno from readFileSync(dbPath) when it failed, e.g. "EBUSY" or
+  // "EACCES" on Windows when Cursor holds an exclusive lock. We were
+  // previously swallowing this and returning source=none, which made the
+  // failure indistinguishable from "DB has no cursorAuth rows" — both
+  // showed up as cursorAuthKeys=[]. Always log this when set.
+  readError?: string;
   // Extra signal collected when the canonical lookup fails. These exist
   // because newer Cursor builds have been observed to move auth state out
   // of `ItemTable / cursorAuth/*` — without this we have no way to tell
@@ -291,12 +297,16 @@ export async function readAccessToken(dbPath: string): Promise<AccessToken | nul
 export async function readAccessTokenDetailed(
   dbPath: string,
 ): Promise<ReadAccessTokenResult> {
-  let buf: Buffer;
-  try {
-    buf = fs.readFileSync(dbPath);
-  } catch {
-    return { token: null, cursorAuthKeys: [], source: "none" };
+  const readRes = readDbWithFallback(dbPath);
+  if (!readRes.buf) {
+    return {
+      token: null,
+      cursorAuthKeys: [],
+      source: "none",
+      readError: readRes.error ?? "unknown",
+    };
   }
+  const buf: Buffer = readRes.buf;
 
   const SQL = await loadSqlJs();
   let db: Database | undefined;
@@ -706,16 +716,39 @@ function countItemTableRows(db: Database): number | null {
  */
 export async function runTokenProbe(): Promise<
   | null
-  | (TokenProbe & { dbPath: string; cursorAuthKeys: string[] })
+  | (TokenProbe & {
+      dbPath: string;
+      cursorAuthKeys: string[];
+      readError: string | null;
+      readFallback: boolean;
+    })
 > {
   const dbPath = findStateDb();
   if (!dbPath) return null;
-  let buf: Buffer;
-  try {
-    buf = fs.readFileSync(dbPath);
-  } catch {
-    return null;
+  const readRes = readDbWithFallback(dbPath);
+  if (!readRes.buf) {
+    // Return a stub so the caller can still log readError + candidateDbStats
+    // instead of just "nothing to probe", which was the unhelpful state on
+    // the emily machine.
+    return {
+      dbPath,
+      cursorAuthKeys: [],
+      readError: readRes.error,
+      readFallback: false,
+      tables: [],
+      itemTableRows: null,
+      candidateDbStats: statCandidateDbs(),
+      itemTableSuspectKeys: [],
+      cursorDiskKVSuspectKeys: [],
+      cursorDiskKVHasJwt: false,
+      mainDbJwtCount: 0,
+      mainDbJwtSamplePrefix: null,
+      walJwtCount: 0,
+      walJwtSamplePrefix: null,
+      storageJsonKeys: readStorageJsonKeys(dbPath),
+    };
   }
+  const buf: Buffer = readRes.buf;
   const SQL = await loadSqlJs();
   let db: Database | undefined;
   let tables: string[] = [];
@@ -756,6 +789,8 @@ export async function runTokenProbe(): Promise<
   return {
     dbPath,
     cursorAuthKeys,
+    readError: null,
+    readFallback: readRes.fallback,
     ...buildProbe(
       dbPath,
       buf,
@@ -775,6 +810,69 @@ function readIfExists(p: string): Buffer | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Read ``state.vscdb`` (or any file) into a Buffer, falling back to a
+ * snapshot copy when Windows refuses a direct read.
+ *
+ * Cursor opens the DB with an exclusive lock on Windows; a direct
+ * ``readFileSync`` against it returns EBUSY/EACCES/EPERM for some users
+ * (so far observed only on certain Windows AV/EDR setups; the same path
+ * reads fine for others, including all WSL hosts). The workaround is the
+ * one VS Code's own user-data backup uses: ``fs.copyFile`` first into
+ * the OS tmpdir, then read the copy. ``copyFile`` opens the source with
+ * ``FILE_SHARE_READ`` semantics on Windows and so succeeds where a plain
+ * read does not.
+ *
+ * Returns ``{ buf, error: null }`` on success or ``{ buf: null, error }``
+ * with the errno from the *direct* read on failure. The caller can pass
+ * ``error`` straight into a log line.
+ */
+function readDbWithFallback(
+  p: string,
+): { buf: Buffer | null; error: string | null; fallback: boolean } {
+  try {
+    return { buf: fs.readFileSync(p), error: null, fallback: false };
+  } catch (e) {
+    const directErr = errnoOf(e);
+    // Only the lock-y errors warrant a snapshot fallback. ENOENT / EISDIR
+    // would still fail after copying, so just bubble them up unchanged.
+    if (directErr !== "EBUSY" && directErr !== "EACCES" && directErr !== "EPERM") {
+      return { buf: null, error: directErr, fallback: false };
+    }
+    try {
+      const tmp = path.join(
+        os.tmpdir(),
+        `ai-cost-tracker-${process.pid}-${Date.now()}-${path.basename(p)}`,
+      );
+      fs.copyFileSync(p, tmp);
+      try {
+        return { buf: fs.readFileSync(tmp), error: null, fallback: true };
+      } finally {
+        try {
+          fs.unlinkSync(tmp);
+        } catch {
+          // Leftover file in tmpdir is harmless; OS will reap it.
+        }
+      }
+    } catch (e2) {
+      // Surface both errors so the log shows whether copyFile also failed
+      // or only the original read did.
+      return {
+        buf: null,
+        error: `direct=${directErr},copy=${errnoOf(e2)}`,
+        fallback: false,
+      };
+    }
+  }
+}
+
+function errnoOf(e: unknown): string {
+  if (e && typeof e === "object" && "code" in e && typeof (e as { code: unknown }).code === "string") {
+    return (e as { code: string }).code;
+  }
+  return e instanceof Error ? e.message : String(e);
 }
 
 /**
@@ -1064,6 +1162,10 @@ export interface AcquireDiagnostics {
   // How the token was ultimately recovered: "sql" path (the normal one),
   // "wal" path (WAL sidecar byte-scan fallback), or "none".
   source: "sql" | "wal" | "none";
+  // errno from the readFileSync against state.vscdb, if it failed.
+  // Threaded straight from ReadAccessTokenResult so the user-facing log
+  // makes "the DB is locked" distinguishable from "the DB has no auth".
+  readError?: string;
   // Probe data collected when the canonical SQL lookup fails. Populated by
   // ``readAccessTokenDetailed`` and threaded through unchanged. Always safe
   // to log: it is restricted to key names, table names, and counts.
@@ -1102,6 +1204,7 @@ export async function acquireAccessTokenDetailed(): Promise<TokenResultWithDiagn
     ...baseDiag,
     cursorAuthKeys: detailed.cursorAuthKeys,
     source: detailed.source,
+    readError: detailed.readError,
     probe: detailed.probe,
   };
   if (!detailed.token) {

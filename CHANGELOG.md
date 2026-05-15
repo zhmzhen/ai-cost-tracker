@@ -2,6 +2,39 @@
 
 All notable changes to AI Cost Tracker for Cursor are documented here.
 
+## 0.4.12
+
+### Fixed
+
+- The real cause of every "Cursor session token not found" report so
+  far appears to be that on some Windows machines (so far observed
+  with antivirus / EDR-protected user profiles) a direct
+  `readFileSync(state.vscdb)` fails with EBUSY / EACCES / EPERM
+  because Cursor is holding an exclusive lock. We were swallowing
+  that error and returning `source=none` with `cursorAuthKeys=[]`,
+  making the failure look identical to "ItemTable has no auth rows".
+  `readAccessTokenDetailed` and `runTokenProbe` now retry through
+  `fs.copyFile -> read` (the same workaround VS Code's own user-data
+  backup uses), which opens the source with `FILE_SHARE_READ` and
+  succeeds where a plain read does not.
+- The errno from the *direct* read is now surfaced in two places:
+  `token lookup: readError=...` in the normal path and
+  `runProbe: readError=... readFallback=true|false` in the
+  diagnostic command. Setting `readFallback=true` is the positive
+  confirmation that the snapshot path is what rescued the read.
+
+### Notes
+
+- This release is also why prior releases worked on the developer
+  machine and not for any of the affected users: the developer reads
+  the DB through the WSL 9P mount, where Windows file-locking
+  semantics do not propagate, so the direct read always succeeds.
+- The 0.4.11 probe contradiction (`runProbe: no state DB found`
+  while the normal lookup printed a valid `dbPath`) was the giveaway
+  — both paths used the same `findStateDb`, but one swallowed
+  `readFileSync` errors silently and one returned null. They now go
+  through a single helper.
+
 ## 0.4.11
 
 ### Added

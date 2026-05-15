@@ -59,7 +59,7 @@ export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context;
   logger = vscode.window.createOutputChannel("AI Cost Tracker");
   context.subscriptions.push(logger);
-  log("activate: starting (version 0.4.11)");
+  log("activate: starting (version 0.4.12)");
 
   // Create the status bar item FIRST and unconditionally. Anything below that
   // throws (sql.js wasm path, command registration, etc.) must not be allowed
@@ -148,6 +148,11 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       log(`runProbe: dbPath=${p.dbPath}`);
+      log(
+        `runProbe: readError=${p.readError ?? "<none>"} readFallback=${
+          p.readFallback
+        }`,
+      );
       log(`runProbe: cursorAuthKeys=${JSON.stringify(p.cursorAuthKeys)}`);
       log(`runProbe: tables=${JSON.stringify(p.tables)}`);
       log(`runProbe: itemTableRows=${p.itemTableRows}`);
@@ -280,6 +285,9 @@ async function getToken(): Promise<{ ok: true; token: AccessToken } | { ok: fals
     )}`,
   );
   log(`token lookup: source=${fresh.diagnostics.source}`);
+  if (fresh.diagnostics.readError) {
+    log(`token lookup: readError=${fresh.diagnostics.readError}`);
+  }
   const probe = fresh.diagnostics.probe;
   if (probe) {
     // When the canonical SELECT misses we need to know *where* the token

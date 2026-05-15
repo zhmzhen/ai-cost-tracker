@@ -175,6 +175,20 @@ async function main() {
     `(cursorDiskKVHasJwt=${e.probe && e.probe.cursorDiskKVHasJwt})`,
   );
 
+  // Regression: when the DB file simply does not exist, the normal lookup
+  // must surface a non-empty readError so the symptom is distinguishable
+  // from "DB exists but ItemTable has no auth rows". Before 0.4.12 both
+  // looked identical (source=none, cursorAuthKeys=[]).
+  const missing = path.join(tmp, "absent.vscdb");
+  const g = await cursor.readAccessTokenDetailed(missing);
+  check(
+    "missing DB → readError surfaced",
+    g.source === "none" &&
+      typeof g.readError === "string" &&
+      g.readError.length > 0,
+    `(readError=${g.readError})`,
+  );
+
   // Regression: the tightened JWT regex should ignore dotted base64-ish
   // identifiers like Cursor's `reactiveStorage.workbench.foo.bar`. Without
   // the `eyJ` anchor the probe was reporting 100+ false positives.
