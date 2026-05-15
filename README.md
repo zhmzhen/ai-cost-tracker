@@ -46,11 +46,16 @@ Template variables: `${cost}`, `${tokens}`, `${quota}`, `${quotaPct}`, `${member
 
 ## Troubleshooting
 
-- **I installed it but no status bar item appears.** Right-click any status
-  bar area → confirm `AI Cost Tracker` is checked. Otherwise run
-  `AI Cost Tracker: Show status bar item` from the command palette. If that
-  still does not help, open `AI Cost Tracker: Show logs` and share the
-  activation lines so the cause can be identified.
+- **I installed it but no status bar item appears.**
+  1. Right-click any **empty area of the status bar** (not the items
+     themselves). A list of every status bar item appears.
+  2. Tick `AI Cost Tracker`. Cursor remembers this choice per profile, so you
+     should only need to do it once.
+  3. If `AI Cost Tracker` is not in the list at all, run
+     `AI Cost Tracker: Show status bar item` from the command palette and try
+     step 1 again.
+  4. If it still does not appear, run `AI Cost Tracker: Show logs` and share
+     the activation lines.
 
 ## Privacy
 
@@ -67,7 +72,7 @@ Earlier 0.x versions depended on a Python `tt` CLI that the user had to install 
 
 ```bash
 npm install
-npm run package      # -> dist-vsix/ai-cost-tracker-0.4.3.vsix
+npm run package      # -> dist-vsix/ai-cost-tracker-0.4.4.vsix
 ```
 
 ## License

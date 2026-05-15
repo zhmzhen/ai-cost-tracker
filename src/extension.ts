@@ -58,7 +58,7 @@ export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context;
   logger = vscode.window.createOutputChannel("AI Cost Tracker");
   context.subscriptions.push(logger);
-  log("activate: starting (version 0.4.3)");
+  log("activate: starting (version 0.4.4)");
 
   // Create the status bar item FIRST and unconditionally. Anything below that
   // throws (sql.js wasm path, command registration, etc.) must not be allowed
@@ -105,12 +105,22 @@ export function activate(context: vscode.ExtensionContext): void {
   // is the recovery handle for users whose status bar item was hidden.
   safeRegister(context, "aiCostTracker.refresh", () => refresh(true));
   safeRegister(context, "aiCostTracker.showDetails", () => showDetails());
-  safeRegister(context, "aiCostTracker.show", () => {
+  safeRegister(context, "aiCostTracker.show", async () => {
     statusBar.show();
-    void vscode.window.showInformationMessage(
-      "AI Cost Tracker: status bar item is now visible. " +
-        "Right-click the status bar to pin it permanently.",
+    // statusBar.show() only flips the extension-side visibility flag. If the
+    // user previously hid the item from the status bar context menu, VS Code's
+    // per-id hidden list still overrides our flag and the user sees no change.
+    // The platform does not expose an API to clear that hidden list, so the
+    // best we can do is guide the user to the right click target.
+    const choice = await vscode.window.showInformationMessage(
+      "AI Cost Tracker: if the status bar item is still hidden, right-click " +
+        "any empty area of the status bar and tick \"AI Cost Tracker\" in the " +
+        "list. Cursor remembers that choice per profile.",
+      "Show logs",
     );
+    if (choice === "Show logs") {
+      logger.show(true);
+    }
   });
   safeRegister(context, "aiCostTracker.showLogs", () => logger.show(true));
 

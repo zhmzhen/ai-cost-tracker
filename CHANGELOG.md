@@ -2,6 +2,25 @@
 
 All notable changes to AI Cost Tracker for Cursor are documented here.
 
+## 0.4.4
+
+### Fixed
+
+- `AI Cost Tracker: Show status bar item` previously told users to "right-click
+  the status bar to pin it permanently", but VS Code's per-id hidden list can
+  override `statusBar.show()`, so the item still did not appear in some
+  profiles. The command's notification now points users at the correct
+  recovery path: right-click any empty area of the status bar and tick
+  `AI Cost Tracker` in the list (this works because 0.4.3 already added a
+  stable id and display name to the item). A "Show logs" button on the
+  notification opens the dedicated output channel.
+
+### Changed
+
+- README Troubleshooting section rewritten to match the actual VS Code 1.74+
+  status bar behavior, including the manual context-menu step Cursor uses to
+  persist visibility per profile.
+
 ## 0.4.3
 
 ### Fixed
