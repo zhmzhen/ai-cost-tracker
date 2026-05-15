@@ -110,6 +110,37 @@ async function main() {
     c.source === "none" && !c.token,
     `(source=${c.source}, recovered=${!!c.token})`,
   );
+  check(
+    "stale DB, no WAL → probe populated (tables listed)",
+    Array.isArray(c.probe && c.probe.tables) &&
+      c.probe.tables.includes("ItemTable"),
+    `(tables=${JSON.stringify(c.probe && c.probe.tables)})`,
+  );
+
+  // Mimic the emilyzh failure mode: ItemTable exists but has no cursorAuth
+  // rows at all. Probe should report the empty cursorAuth key list, list
+  // the table, and find zero JWTs anywhere.
+  const moved = path.join(tmp, "moved.vscdb");
+  db = new SQL.Database();
+  db.run("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)");
+  db.run("INSERT INTO ItemTable VALUES (?, ?)", [
+    "telemetry.machineId",
+    "abc123",
+  ]);
+  fs.writeFileSync(moved, Buffer.from(db.export()));
+  db.close();
+  const d = await cursor.readAccessTokenDetailed(moved);
+  check(
+    "moved-auth DB → source=none, probe surfaces empty cursorAuth",
+    d.source === "none" &&
+      d.cursorAuthKeys.length === 0 &&
+      d.probe &&
+      d.probe.mainDbJwtCount === 0 &&
+      d.probe.tables.includes("ItemTable"),
+    `(cursorAuthKeys=${JSON.stringify(d.cursorAuthKeys)}, jwt=${
+      d.probe && d.probe.mainDbJwtCount
+    })`,
+  );
 
   fs.rmSync(tmp, { recursive: true, force: true });
   if (failed > 0) {

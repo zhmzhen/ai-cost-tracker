@@ -2,6 +2,27 @@
 
 All notable changes to AI Cost Tracker for Cursor are documented here.
 
+## 0.4.8
+
+### Added
+
+- Probe logging for the "session token not found" failure mode where the
+  canonical SELECT against `ItemTable WHERE key LIKE 'cursorAuth%'`
+  returns zero rows. When this happens the extension now records and
+  logs, all non-sensitive:
+  - every table name in `state.vscdb` (to detect a schema move, e.g. into
+    a `cursorDiskKV` table some newer Cursor builds use);
+  - any `ItemTable` keys whose prefix is one of `cursor`, `auth`, `workos`,
+    `session`, `token`, `user` (to spot a key-name rename);
+  - the count of JWT-shaped runs found in the main DB and the WAL sidecar,
+    plus a 12-character non-secret prefix of the first one (so a future
+    release knows whether the token is still physically present somewhere
+    in the file);
+  - the top-level keys of `globalStorage/storage.json` (since some Cursor
+    builds have moved auth state out of SQLite entirely).
+- The extra fields appear in the AI Cost Tracker output channel as
+  `token probe: ...` lines. They never contain secret material.
+
 ## 0.4.7
 
 ### Fixed

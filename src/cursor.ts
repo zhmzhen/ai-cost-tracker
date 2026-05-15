@@ -225,6 +225,34 @@ export interface ReadAccessTokenResult {
   // recovered by scanning the SQLite WAL sidecar because the SELECT returned
   // no rows. "none" = no token was found by either path.
   source: "sql" | "wal" | "none";
+  // Extra signal collected when the canonical lookup fails. These exist
+  // because newer Cursor builds have been observed to move auth state out
+  // of `ItemTable / cursorAuth/*` — without this we have no way to tell
+  // *where* the token went and end up guessing in subsequent releases.
+  probe?: TokenProbe;
+}
+
+export interface TokenProbe {
+  // All table names that exist in the main state.vscdb file.
+  tables: string[];
+  // ItemTable keys whose prefix matches a small allow-list (cursor*, auth*,
+  // workos*, session*, token*). Values are never included.
+  itemTableSuspectKeys: string[];
+  // Count of JWT-shaped runs found by a bounded byte-scan of the main DB.
+  // We only return the count (and one prefix) because dumping every JWT
+  // body to logs would leak the token if the user pastes the log.
+  mainDbJwtCount: number;
+  // First 12 chars of the first JWT-shaped run found in the main DB. Same
+  // privacy reasoning as above — a 12-char prefix is not enough to forge
+  // requests but is enough to correlate two runs of the diagnostic.
+  mainDbJwtSamplePrefix: string | null;
+  // Same as above but for the WAL sidecar.
+  walJwtCount: number;
+  walJwtSamplePrefix: string | null;
+  // Top-level keys of globalStorage/storage.json (sibling of state.vscdb),
+  // if that file exists and parses as JSON. Useful because some Cursor
+  // builds have stored auth state in a plain JSON file instead of SQLite.
+  storageJsonKeys: string[] | null;
 }
 
 export async function readAccessToken(dbPath: string): Promise<AccessToken | null> {
@@ -245,6 +273,8 @@ export async function readAccessTokenDetailed(
   const SQL = await loadSqlJs();
   let db: Database | undefined;
   let sqlKeys: string[] = [];
+  let tables: string[] = [];
+  let suspectKeys: string[] = [];
   try {
     db = new SQL.Database(buf);
   } catch {
@@ -289,6 +319,11 @@ export async function readAccessTokenDetailed(
           }
         }
       }
+
+      // Canonical SELECT yielded no usable token. Collect probe data so the
+      // next release has something to work with instead of another guess.
+      tables = listTables(db);
+      suspectKeys = listSuspectItemTableKeys(db);
     } finally {
       db.close();
     }
@@ -300,18 +335,132 @@ export async function readAccessTokenDetailed(
   // cannot apply the WAL, so any rows written after the last checkpoint are
   // invisible to the SELECT above. Fall back to a byte scan of the WAL
   // sidecar to find the JWT directly. We intentionally do NOT scan the main
-  // DB byte stream: if the token were present in the main file the SQL
+  // DB byte stream for the *token* (if it were in the main file the SQL
   // SELECT would already have returned it, and the main DB is regularly
-  // multiple GB which is too large to bytes-scan cheaply.
+  // multiple GB which is too large to bytes-scan cheaply); we do however
+  // sample it during the probe below.
   const walBytes = readIfExists(`${dbPath}-wal`);
   if (walBytes) {
     const tok = scanRawForJwt(walBytes);
     if (tok) {
-      return { token: tok, cursorAuthKeys: sqlKeys, source: "wal" };
+      return {
+        token: tok,
+        cursorAuthKeys: sqlKeys,
+        source: "wal",
+        probe: buildProbe(dbPath, buf, walBytes, tables, suspectKeys),
+      };
     }
   }
 
-  return { token: null, cursorAuthKeys: sqlKeys, source: "none" };
+  return {
+    token: null,
+    cursorAuthKeys: sqlKeys,
+    source: "none",
+    probe: buildProbe(dbPath, buf, walBytes, tables, suspectKeys),
+  };
+}
+
+/** List every user-visible table name in the open SQLite database. */
+function listTables(db: Database): string[] {
+  try {
+    const res = db.exec(
+      "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
+    );
+    if (!res.length) return [];
+    return (res[0].values as Array<[unknown]>)
+      .map(([n]) => (typeof n === "string" ? n : ""))
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Return ItemTable keys whose name might plausibly contain auth state in a
+ * Cursor build that has moved away from the old `cursorAuth/*` convention.
+ * Values are never read; the list is safe to log.
+ */
+function listSuspectItemTableKeys(db: Database): string[] {
+  const PREFIXES = ["cursor", "auth", "workos", "session", "token", "user"];
+  const out: string[] = [];
+  try {
+    for (const pref of PREFIXES) {
+      const res = db.exec(
+        `SELECT key FROM ItemTable WHERE key LIKE '${pref}%' LIMIT 50`,
+      );
+      if (!res.length) continue;
+      for (const [k] of res[0].values as Array<[unknown]>) {
+        if (typeof k === "string") out.push(k);
+      }
+    }
+  } catch {
+    // ItemTable may not exist on a fresh DB; the empty list is informative.
+  }
+  return out;
+}
+
+/**
+ * Bounded scan: walk up to MAX_PROBE_BYTES of ``bytes`` looking for JWT-
+ * shaped runs and return how many we saw plus a non-secret prefix of the
+ * first one. We never return the full JWT — if the user pastes the log we
+ * do not want to leak a working session token.
+ */
+const MAX_PROBE_BYTES = 64 * 1024 * 1024;
+function probeJwts(
+  bytes: Buffer | null,
+): { count: number; samplePrefix: string | null } {
+  if (!bytes) return { count: 0, samplePrefix: null };
+  const slice = bytes.length > MAX_PROBE_BYTES
+    ? bytes.subarray(0, MAX_PROBE_BYTES)
+    : bytes;
+  const text = slice.toString("latin1");
+  const jwtCharset = "A-Za-z0-9_\\-";
+  const re = new RegExp(
+    `[${jwtCharset}]{10,}\\.[${jwtCharset}]{10,}\\.[${jwtCharset}]{10,}`,
+    "g",
+  );
+  let count = 0;
+  let samplePrefix: string | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    count++;
+    if (samplePrefix === null) samplePrefix = m[0].slice(0, 12);
+    if (count >= 100) break; // capping prevents pathological loops
+  }
+  return { count, samplePrefix };
+}
+
+/** Read globalStorage/storage.json and return its top-level keys, if any. */
+function readStorageJsonKeys(dbPath: string): string[] | null {
+  const candidate = path.join(path.dirname(dbPath), "storage.json");
+  try {
+    const txt = fs.readFileSync(candidate, "utf8");
+    const obj = JSON.parse(txt);
+    if (obj && typeof obj === "object") return Object.keys(obj).slice(0, 50);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function buildProbe(
+  dbPath: string,
+  mainBytes: Buffer,
+  walBytes: Buffer | null,
+  tables: string[],
+  suspectKeys: string[],
+): TokenProbe {
+  const main = probeJwts(mainBytes);
+  const wal = probeJwts(walBytes);
+  return {
+    tables,
+    itemTableSuspectKeys: suspectKeys,
+    mainDbJwtCount: main.count,
+    mainDbJwtSamplePrefix: main.samplePrefix,
+    walJwtCount: wal.count,
+    walJwtSamplePrefix: wal.samplePrefix,
+    storageJsonKeys: readStorageJsonKeys(dbPath),
+  };
 }
 
 function readIfExists(p: string): Buffer | null {
@@ -609,6 +758,10 @@ export interface AcquireDiagnostics {
   // How the token was ultimately recovered: "sql" path (the normal one),
   // "wal" path (WAL sidecar byte-scan fallback), or "none".
   source: "sql" | "wal" | "none";
+  // Probe data collected when the canonical SQL lookup fails. Populated by
+  // ``readAccessTokenDetailed`` and threaded through unchanged. Always safe
+  // to log: it is restricted to key names, table names, and counts.
+  probe?: TokenProbe;
 }
 
 export type TokenResultWithDiagnostics =
@@ -643,6 +796,7 @@ export async function acquireAccessTokenDetailed(): Promise<TokenResultWithDiagn
     ...baseDiag,
     cursorAuthKeys: detailed.cursorAuthKeys,
     source: detailed.source,
+    probe: detailed.probe,
   };
   if (!detailed.token) {
     return { ok: false, error: "no_access_token", diagnostics: diag };

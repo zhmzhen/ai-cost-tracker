@@ -58,7 +58,7 @@ export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context;
   logger = vscode.window.createOutputChannel("AI Cost Tracker");
   context.subscriptions.push(logger);
-  log("activate: starting (version 0.4.7)");
+  log("activate: starting (version 0.4.8)");
 
   // Create the status bar item FIRST and unconditionally. Anything below that
   // throws (sql.js wasm path, command registration, etc.) must not be allowed
@@ -233,6 +233,31 @@ async function getToken(): Promise<{ ok: true; token: AccessToken } | { ok: fals
     )}`,
   );
   log(`token lookup: source=${fresh.diagnostics.source}`);
+  const probe = fresh.diagnostics.probe;
+  if (probe) {
+    // When the canonical SELECT misses we need to know *where* the token
+    // went. The probe is bounded and contains no secrets — only names and
+    // counts — so it is safe to surface in plain logs.
+    log(`token probe: tables=${JSON.stringify(probe.tables)}`);
+    log(
+      `token probe: itemTableSuspectKeys=${JSON.stringify(
+        probe.itemTableSuspectKeys,
+      )}`,
+    );
+    log(
+      `token probe: mainDb jwtCount=${probe.mainDbJwtCount} samplePrefix=${
+        probe.mainDbJwtSamplePrefix ?? "<none>"
+      }`,
+    );
+    log(
+      `token probe: wal jwtCount=${probe.walJwtCount} samplePrefix=${
+        probe.walJwtSamplePrefix ?? "<none>"
+      }`,
+    );
+    log(
+      `token probe: storageJsonKeys=${JSON.stringify(probe.storageJsonKeys)}`,
+    );
+  }
   if (!fresh.ok) {
     return { ok: false, error: describeError(fresh.error) };
   }
