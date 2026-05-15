@@ -2,6 +2,31 @@
 
 All notable changes to AI Cost Tracker for Cursor are documented here.
 
+## 0.4.6
+
+### Fixed
+
+- Some users with a working Cursor sign-in still saw "Cursor session token not
+  found", with diagnostics showing the correct `state.vscdb` and an empty
+  `cursorAuthKeys` list. Root cause: Cursor uses SQLite WAL mode, so a
+  freshly written `cursorAuth/accessToken` lives in the `state.vscdb-wal`
+  sidecar until Cursor checkpoints the WAL back into the main file. `sql.js`
+  loads only the main file's bytes and cannot apply the WAL, so the SELECT
+  legitimately returned no rows for these users.
+- The token reader now falls back to a byte-level scan of `state.vscdb` and
+  `state.vscdb-wal` when the SELECT path comes back empty. The scan looks
+  for `cursorAuth/accessToken` followed by the nearest JWT-shaped run, and
+  validates it via the same JWT-payload check as the SQL path before
+  trusting it. This lets the extension recover the token from a running
+  Cursor without waiting for a checkpoint or a restart.
+
+### Added
+
+- `AI Cost Tracker: Show logs` now records which path produced the token
+  on each refresh: `source=sql` for the normal SQL SELECT, `source=wal` for
+  the WAL byte-scan fallback, or `source=none` if neither path found a
+  usable JWT.
+
 ## 0.4.5
 
 ### Fixed

@@ -58,7 +58,7 @@ export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context;
   logger = vscode.window.createOutputChannel("AI Cost Tracker");
   context.subscriptions.push(logger);
-  log("activate: starting (version 0.4.5)");
+  log("activate: starting (version 0.4.6)");
 
   // Create the status bar item FIRST and unconditionally. Anything below that
   // throws (sql.js wasm path, command registration, etc.) must not be allowed
@@ -221,6 +221,7 @@ async function getToken(): Promise<{ ok: true; token: AccessToken } | { ok: fals
       fresh.diagnostics.cursorAuthKeys,
     )}`,
   );
+  log(`token lookup: source=${fresh.diagnostics.source}`);
   if (!fresh.ok) {
     return { ok: false, error: describeError(fresh.error) };
   }

@@ -220,6 +220,11 @@ export interface ReadAccessTokenResult {
   // For diagnostics only: which `cursorAuth/*` keys were present in the DB.
   // Never includes values, so it is safe to log.
   cursorAuthKeys: string[];
+  // Indicates how the token was ultimately recovered, for the diagnostics
+  // log. "sql" = found via sql.js SELECT against the main DB file. "wal" =
+  // recovered by scanning the SQLite WAL sidecar because the SELECT returned
+  // no rows. "none" = no token was found by either path.
+  source: "sql" | "wal" | "none";
 }
 
 export async function readAccessToken(dbPath: string): Promise<AccessToken | null> {
@@ -234,60 +239,151 @@ export async function readAccessTokenDetailed(
   try {
     buf = fs.readFileSync(dbPath);
   } catch {
-    return { token: null, cursorAuthKeys: [] };
+    return { token: null, cursorAuthKeys: [], source: "none" };
   }
 
   const SQL = await loadSqlJs();
   let db: Database | undefined;
+  let sqlKeys: string[] = [];
   try {
     db = new SQL.Database(buf);
   } catch {
-    return { token: null, cursorAuthKeys: [] };
+    db = undefined;
   }
 
-  try {
-    // Pull every key under cursorAuth/* so we can both pick the right one and
-    // emit a key list to the diagnostic log when nothing matched. Cursor has
-    // historically stored the token under `cursorAuth/accessToken`, but newer
-    // builds may use a slightly different key shape; scanning the prefix lets
-    // us survive that without another release.
-    const res = db.exec(
-      "SELECT key, value FROM ItemTable WHERE key LIKE 'cursorAuth%'",
-    );
-    if (!res.length) {
-      return { token: null, cursorAuthKeys: [] };
-    }
-    const rows = res[0].values as Array<[unknown, unknown]>;
-    const keys: string[] = [];
-    for (const [k] of rows) {
-      if (typeof k === "string") keys.push(k);
-    }
+  if (db) {
+    try {
+      // Pull every key under cursorAuth/* so we can both pick the right one
+      // and emit a key list to the diagnostic log when nothing matched.
+      // Cursor has historically stored the token under
+      // `cursorAuth/accessToken`, but newer builds may use a slightly
+      // different key shape; scanning the prefix lets us survive that
+      // without another release.
+      const res = db.exec(
+        "SELECT key, value FROM ItemTable WHERE key LIKE 'cursorAuth%'",
+      );
+      if (res.length) {
+        const rows = res[0].values as Array<[unknown, unknown]>;
+        for (const [k] of rows) {
+          if (typeof k === "string") sqlKeys.push(k);
+        }
 
-    // Prefer the canonical key, then fall back to anything in the namespace
-    // whose value parses as a JWT.
-    const preferred = ["cursorAuth/accessToken", "cursorAuth.accessToken"];
-    const ordered = [
-      ...rows.filter(([k]) => typeof k === "string" && preferred.includes(k as string)),
-      ...rows.filter(([k]) => typeof k === "string" && !preferred.includes(k as string)),
-    ];
+        const preferred = ["cursorAuth/accessToken", "cursorAuth.accessToken"];
+        const ordered = [
+          ...rows.filter(
+            ([k]) => typeof k === "string" && preferred.includes(k as string),
+          ),
+          ...rows.filter(
+            ([k]) => typeof k === "string" && !preferred.includes(k as string),
+          ),
+        ];
+        for (const [, rawValue] of ordered) {
+          if (typeof rawValue !== "string") continue;
+          const tok = parseJwtToToken(rawValue);
+          if (tok) {
+            return {
+              token: tok,
+              cursorAuthKeys: sqlKeys,
+              source: "sql",
+            };
+          }
+        }
+      }
+    } finally {
+      db.close();
+    }
+  }
 
-    for (const [, rawValue] of ordered) {
-      if (typeof rawValue !== "string") continue;
-      if (rawValue.split(".").length !== 3) continue;
-      const payload = decodeJwtPayload(rawValue);
-      if (!payload) continue;
-      const sub = typeof payload.sub === "string" ? payload.sub : "";
-      const exp = Number(payload.exp);
-      if (!sub || !Number.isFinite(exp)) continue;
+  // SQL path returned no usable token. The most common reason on Windows is
+  // that Cursor is still running and the freshly written token still lives
+  // in the SQLite WAL sidecar — sql.js loads only the main DB bytes and
+  // cannot apply the WAL, so any rows written after the last checkpoint are
+  // invisible to the SELECT above. Fall back to a byte scan of both the
+  // main file and the WAL sidecar to find the JWT directly.
+  const scanInputs: Array<{ name: string; bytes: Buffer | null }> = [
+    { name: dbPath, bytes: buf },
+    { name: `${dbPath}-wal`, bytes: readIfExists(`${dbPath}-wal`) },
+  ];
+  for (const { bytes } of scanInputs) {
+    if (!bytes) continue;
+    const tok = scanRawForJwt(bytes);
+    if (tok) {
       return {
-        token: { token: rawValue, sub, expiresAt: exp },
-        cursorAuthKeys: keys,
+        token: tok,
+        cursorAuthKeys: sqlKeys,
+        source: "wal",
       };
     }
-    return { token: null, cursorAuthKeys: keys };
-  } finally {
-    db.close();
   }
+
+  return { token: null, cursorAuthKeys: sqlKeys, source: "none" };
+}
+
+function readIfExists(p: string): Buffer | null {
+  try {
+    return fs.readFileSync(p);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decode a JWT string into an AccessToken; null if shape/payload is wrong.
+ */
+function parseJwtToToken(raw: string): AccessToken | null {
+  if (raw.split(".").length !== 3) return null;
+  const payload = decodeJwtPayload(raw);
+  if (!payload) return null;
+  const sub = typeof payload.sub === "string" ? payload.sub : "";
+  const exp = Number(payload.exp);
+  if (!sub || !Number.isFinite(exp)) return null;
+  return { token: raw, sub, expiresAt: exp };
+}
+
+/**
+ * Last-resort fallback for Cursor builds where the access token has just
+ * been written and is still pinned in the SQLite WAL sidecar. We scan the
+ * raw bytes for the string `cursorAuth/accessToken`, then read forward to
+ * the next plausible JWT (three base64url segments separated by `.`). This
+ * is a byte-level heuristic, not a SQLite parse, so it has to validate the
+ * candidate string through ``parseJwtToToken`` before trusting it.
+ */
+export function scanRawForJwt(bytes: Buffer): AccessToken | null {
+  // Decoding the entire buffer as latin1 keeps every byte as a 1:1 character
+  // and is much cheaper than UTF-8 decoding for multi-GB Cursor DBs.
+  const text = bytes.toString("latin1");
+  const jwtCharset = "A-Za-z0-9_\\-";
+  const jwtPattern = new RegExp(
+    `[${jwtCharset}]+\\.[${jwtCharset}]+\\.[${jwtCharset}]+`,
+    "g",
+  );
+
+  // Strategy 1: look for `cursorAuth/accessToken` (or the dot variant) and
+  // consume the next JWT-shaped run that appears after it. SQLite stores the
+  // key and value back-to-back in the page payload, so the value is normally
+  // within a few hundred bytes of the key string.
+  const keyPattern = /cursorAuth[\/\.]accessToken/g;
+  let keyMatch: RegExpExecArray | null;
+  while ((keyMatch = keyPattern.exec(text)) !== null) {
+    jwtPattern.lastIndex = keyMatch.index + keyMatch[0].length;
+    const m = jwtPattern.exec(text);
+    if (!m) continue;
+    if (m.index - keyMatch.index > 4096) continue;
+    const tok = parseJwtToToken(m[0]);
+    if (tok) return tok;
+  }
+
+  // Strategy 2: no nearby key was found. Some WAL frames split the key off
+  // from the value across the page boundary. Walk every JWT-shaped run in
+  // the buffer and accept the first one whose payload decodes as a Cursor
+  // access token (has `sub` and a future-ish `exp`).
+  jwtPattern.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = jwtPattern.exec(text)) !== null) {
+    const tok = parseJwtToToken(m[0]);
+    if (tok) return tok;
+  }
+  return null;
 }
 
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
@@ -468,6 +564,9 @@ export interface AcquireDiagnostics {
   candidateUserDirs: string[];
   // Keys observed under `cursorAuth*` in the DB (no values).
   cursorAuthKeys: string[];
+  // How the token was ultimately recovered: "sql" path (the normal one),
+  // "wal" path (WAL sidecar byte-scan fallback), or "none".
+  source: "sql" | "wal" | "none";
 }
 
 export type TokenResultWithDiagnostics =
@@ -487,6 +586,7 @@ export async function acquireAccessTokenDetailed(): Promise<TokenResultWithDiagn
     dbPath: db,
     candidateUserDirs: candidates,
     cursorAuthKeys: [],
+    source: "none",
   };
   if (!db) {
     return { ok: false, error: "state_db_not_found", diagnostics: baseDiag };
@@ -500,6 +600,7 @@ export async function acquireAccessTokenDetailed(): Promise<TokenResultWithDiagn
   const diag: AcquireDiagnostics = {
     ...baseDiag,
     cursorAuthKeys: detailed.cursorAuthKeys,
+    source: detailed.source,
   };
   if (!detailed.token) {
     return { ok: false, error: "no_access_token", diagnostics: diag };
