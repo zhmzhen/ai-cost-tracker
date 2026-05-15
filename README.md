@@ -41,6 +41,16 @@ Template variables: `${cost}`, `${tokens}`, `${quota}`, `${quotaPct}`, `${member
 |---|---|
 | `AI Cost Tracker: Refresh now` | Force an immediate refresh. |
 | `AI Cost Tracker: Show raw cycle data (JSON)` | Open the latest fetched summary as JSON. |
+| `AI Cost Tracker: Show status bar item` | Bring the status bar item back if you previously hid it. |
+| `AI Cost Tracker: Show logs` | Open the dedicated output channel with activation diagnostics. |
+
+## Troubleshooting
+
+- **I installed it but no status bar item appears.** Right-click any status
+  bar area → confirm `AI Cost Tracker` is checked. Otherwise run
+  `AI Cost Tracker: Show status bar item` from the command palette. If that
+  still does not help, open `AI Cost Tracker: Show logs` and share the
+  activation lines so the cause can be identified.
 
 ## Privacy
 
@@ -57,7 +67,7 @@ Earlier 0.x versions depended on a Python `tt` CLI that the user had to install 
 
 ```bash
 npm install
-npm run package      # -> dist-vsix/ai-cost-tracker-0.4.2.vsix
+npm run package      # -> dist-vsix/ai-cost-tracker-0.4.3.vsix
 ```
 
 ## License

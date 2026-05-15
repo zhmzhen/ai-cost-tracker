@@ -37,6 +37,7 @@ import {
 
 let extensionContext: vscode.ExtensionContext;
 let statusBar: vscode.StatusBarItem;
+let logger: vscode.OutputChannel;
 let refreshTimer: NodeJS.Timeout | undefined;
 let lastSummary: MonthSummary | undefined;
 let lastError: string | undefined;
@@ -47,29 +48,73 @@ const REFRESH_MIN_SEC = 5;
 const REFRESH_DEFAULT_SEC = 60;
 const STALE_DEFAULT_SEC = 600;
 const TOKEN_STATE_KEY = "aiCostTracker.token.v1";
+// Stable id/name so Cursor can persist the user's show/hide choice and surface
+// it in the status-bar context menu. Without these, some Cursor builds hide
+// the item on first paint and the user has no obvious way to recover it.
+const STATUS_BAR_ID = "aiCostTracker.statusBar";
+const STATUS_BAR_NAME = "AI Cost Tracker";
 
 export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context;
-  // sql.js needs to find its sibling sql-wasm.wasm at runtime. We ship it
-  // alongside the compiled JS so it works in every install target (local,
-  // Remote-WSL, Remote-SSH, Windows native) without any user configuration.
-  setWasmDirectory(path.join(context.extensionPath, "media"));
+  logger = vscode.window.createOutputChannel("AI Cost Tracker");
+  context.subscriptions.push(logger);
+  log("activate: starting (version 0.4.3)");
 
-  statusBar = vscode.window.createStatusBarItem(
-    vscode.StatusBarAlignment.Right,
-    100,
-  );
-  statusBar.command = "aiCostTracker.refresh";
-  statusBar.text = "$(symbol-event) Cursor: …";
-  statusBar.tooltip = "AI Cost Tracker: fetching usage…";
-  statusBar.show();
-  context.subscriptions.push(statusBar);
+  // Create the status bar item FIRST and unconditionally. Anything below that
+  // throws (sql.js wasm path, command registration, etc.) must not be allowed
+  // to leave the user with no visible UI.
+  try {
+    statusBar = vscode.window.createStatusBarItem(
+      STATUS_BAR_ID,
+      vscode.StatusBarAlignment.Right,
+      100,
+    );
+    statusBar.name = STATUS_BAR_NAME;
+    statusBar.command = "aiCostTracker.refresh";
+    statusBar.text = "$(symbol-event) Cursor: …";
+    statusBar.tooltip = "AI Cost Tracker: fetching usage…";
+    statusBar.show();
+    context.subscriptions.push(statusBar);
+    log("activate: status bar created");
+  } catch (e) {
+    // Extremely defensive: if the id-based overload is unsupported, fall back
+    // to the legacy positional overload so we still render something.
+    log(`activate: id-based createStatusBarItem failed: ${describe(e)}`);
+    statusBar = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Right,
+      100,
+    );
+    statusBar.command = "aiCostTracker.refresh";
+    statusBar.text = "$(symbol-event) Cursor: …";
+    statusBar.tooltip = "AI Cost Tracker: fetching usage…";
+    statusBar.show();
+    context.subscriptions.push(statusBar);
+  }
+
+  try {
+    // sql.js needs to find its sibling sql-wasm.wasm at runtime. We ship it
+    // alongside the compiled JS so it works in every install target (local,
+    // Remote-WSL, Remote-SSH, Windows native) without any user configuration.
+    setWasmDirectory(path.join(context.extensionPath, "media"));
+  } catch (e) {
+    log(`activate: setWasmDirectory failed: ${describe(e)}`);
+  }
+
+  // Register commands inside try/catch so a failure in one does not prevent
+  // the others from being available — in particular ``aiCostTracker.show``
+  // is the recovery handle for users whose status bar item was hidden.
+  safeRegister(context, "aiCostTracker.refresh", () => refresh(true));
+  safeRegister(context, "aiCostTracker.showDetails", () => showDetails());
+  safeRegister(context, "aiCostTracker.show", () => {
+    statusBar.show();
+    void vscode.window.showInformationMessage(
+      "AI Cost Tracker: status bar item is now visible. " +
+        "Right-click the status bar to pin it permanently.",
+    );
+  });
+  safeRegister(context, "aiCostTracker.showLogs", () => logger.show(true));
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("aiCostTracker.refresh", () =>
-      refresh(true),
-    ),
-    vscode.commands.registerCommand("aiCostTracker.showDetails", showDetails),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("aiCostTracker")) {
         scheduleRefresh();
@@ -81,6 +126,34 @@ export function activate(context: vscode.ExtensionContext): void {
   // Fire the first refresh asynchronously so activation never blocks the UI.
   void refresh(false);
   scheduleRefresh();
+  log("activate: done");
+}
+
+function safeRegister(
+  context: vscode.ExtensionContext,
+  command: string,
+  handler: (...args: unknown[]) => unknown,
+): void {
+  try {
+    context.subscriptions.push(
+      vscode.commands.registerCommand(command, handler),
+    );
+  } catch (e) {
+    log(`activate: registerCommand(${command}) failed: ${describe(e)}`);
+  }
+}
+
+function log(msg: string): void {
+  try {
+    logger?.appendLine(`[${new Date().toISOString()}] ${msg}`);
+  } catch {
+    // logger may be undefined extremely early; never let logging itself throw.
+  }
+}
+
+function describe(e: unknown): string {
+  if (e instanceof Error) return `${e.name}: ${e.message}`;
+  return String(e);
 }
 
 export function deactivate(): void {
