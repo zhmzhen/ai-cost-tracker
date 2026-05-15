@@ -2,6 +2,22 @@
 
 All notable changes to AI Cost Tracker for Cursor are documented here.
 
+## 0.4.9
+
+### Added
+
+- New command `AI Cost Tracker: Run token probe (diagnostic)`. The 0.4.8
+  probe was wired to run *only* when the canonical SQL SELECT misses,
+  which meant a machine where SQL still works could not be used to
+  confirm that the probe code in the deployed VSIX is alive. This
+  command runs the probe unconditionally — it queries `sqlite_master`,
+  lists ItemTable keys, samples JWT-shaped runs in the main DB and WAL,
+  and reads top-level keys of `storage.json` — and prints all five
+  `runProbe: ...` lines to the output channel.
+- No behaviour change for the normal refresh path; the new command is
+  only used when an operator wants to compare probe output across
+  machines that succeed vs. fail.
+
 ## 0.4.8
 
 ### Added

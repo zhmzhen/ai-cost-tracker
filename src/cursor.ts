@@ -463,6 +463,66 @@ function buildProbe(
   };
 }
 
+/**
+ * Run the diagnostic probe against the state DB regardless of whether the
+ * SQL lookup currently succeeds. Useful when the maintainer needs to
+ * confirm a deployed build's probe code is wired up correctly on a
+ * machine where the canonical SELECT happens to work — the normal
+ * lookup path skips the probe by design once SQL returns a token, so
+ * happy-path users would otherwise have no way to exercise it.
+ *
+ * Returns null if the DB cannot be located or opened.
+ */
+export async function runTokenProbe(): Promise<
+  | null
+  | (TokenProbe & { dbPath: string; cursorAuthKeys: string[] })
+> {
+  const dbPath = findStateDb();
+  if (!dbPath) return null;
+  let buf: Buffer;
+  try {
+    buf = fs.readFileSync(dbPath);
+  } catch {
+    return null;
+  }
+  const SQL = await loadSqlJs();
+  let db: Database | undefined;
+  let tables: string[] = [];
+  let suspectKeys: string[] = [];
+  const cursorAuthKeys: string[] = [];
+  try {
+    db = new SQL.Database(buf);
+  } catch {
+    db = undefined;
+  }
+  if (db) {
+    try {
+      tables = listTables(db);
+      suspectKeys = listSuspectItemTableKeys(db);
+      try {
+        const res = db.exec(
+          "SELECT key FROM ItemTable WHERE key LIKE 'cursorAuth%'",
+        );
+        if (res.length) {
+          for (const [k] of res[0].values as Array<[unknown]>) {
+            if (typeof k === "string") cursorAuthKeys.push(k);
+          }
+        }
+      } catch {
+        // ItemTable may not exist; cursorAuthKeys stays empty.
+      }
+    } finally {
+      db.close();
+    }
+  }
+  const walBytes = readIfExists(`${dbPath}-wal`);
+  return {
+    dbPath,
+    cursorAuthKeys,
+    ...buildProbe(dbPath, buf, walBytes, tables, suspectKeys),
+  };
+}
+
 function readIfExists(p: string): Buffer | null {
   try {
     return fs.readFileSync(p);

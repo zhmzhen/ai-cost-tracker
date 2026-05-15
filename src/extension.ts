@@ -31,6 +31,7 @@ import {
   acquireAccessTokenDetailed,
   describeError,
   fetchMonthSummaryWithToken,
+  runTokenProbe,
   setWasmDirectory,
   validateCachedToken,
 } from "./cursor";
@@ -58,7 +59,7 @@ export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context;
   logger = vscode.window.createOutputChannel("AI Cost Tracker");
   context.subscriptions.push(logger);
-  log("activate: starting (version 0.4.8)");
+  log("activate: starting (version 0.4.9)");
 
   // Create the status bar item FIRST and unconditionally. Anything below that
   // throws (sql.js wasm path, command registration, etc.) must not be allowed
@@ -133,6 +134,42 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   });
   safeRegister(context, "aiCostTracker.showLogs", () => logger.show(true));
+  safeRegister(context, "aiCostTracker.runProbe", async () => {
+    // Force the diagnostic probe to run regardless of whether the SQL
+    // lookup currently succeeds. Lets the maintainer verify on a
+    // working machine that the probe code in the deployed VSIX is wired
+    // up correctly, instead of having to break the user's auth state.
+    logger.show(true);
+    log("runProbe: starting diagnostic probe");
+    try {
+      const p = await runTokenProbe();
+      if (!p) {
+        log("runProbe: no state DB found; nothing to probe");
+        return;
+      }
+      log(`runProbe: dbPath=${p.dbPath}`);
+      log(`runProbe: cursorAuthKeys=${JSON.stringify(p.cursorAuthKeys)}`);
+      log(`runProbe: tables=${JSON.stringify(p.tables)}`);
+      log(
+        `runProbe: itemTableSuspectKeys=${JSON.stringify(
+          p.itemTableSuspectKeys,
+        )}`,
+      );
+      log(
+        `runProbe: mainDb jwtCount=${p.mainDbJwtCount} samplePrefix=${
+          p.mainDbJwtSamplePrefix ?? "<none>"
+        }`,
+      );
+      log(
+        `runProbe: wal jwtCount=${p.walJwtCount} samplePrefix=${
+          p.walJwtSamplePrefix ?? "<none>"
+        }`,
+      );
+      log(`runProbe: storageJsonKeys=${JSON.stringify(p.storageJsonKeys)}`);
+    } catch (e) {
+      log(`runProbe: failed: ${describe(e)}`);
+    }
+  });
   safeRegister(context, "aiCostTracker.forceReread", async () => {
     // Diagnostic-only: clear the cached JWT so the next refresh re-runs the
     // full lookup pipeline (SQL SELECT → WAL byte-scan). Useful when
