@@ -59,7 +59,7 @@ export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context;
   logger = vscode.window.createOutputChannel("AI Cost Tracker");
   context.subscriptions.push(logger);
-  log("activate: starting (version 0.4.10)");
+  log("activate: starting (version 0.4.11)");
 
   // Create the status bar item FIRST and unconditionally. Anything below that
   // throws (sql.js wasm path, command registration, etc.) must not be allowed
@@ -150,6 +150,10 @@ export function activate(context: vscode.ExtensionContext): void {
       log(`runProbe: dbPath=${p.dbPath}`);
       log(`runProbe: cursorAuthKeys=${JSON.stringify(p.cursorAuthKeys)}`);
       log(`runProbe: tables=${JSON.stringify(p.tables)}`);
+      log(`runProbe: itemTableRows=${p.itemTableRows}`);
+      log(
+        `runProbe: candidateDbStats=${JSON.stringify(p.candidateDbStats)}`,
+      );
       log(
         `runProbe: itemTableSuspectKeys=${JSON.stringify(
           p.itemTableSuspectKeys,
@@ -282,6 +286,10 @@ async function getToken(): Promise<{ ok: true; token: AccessToken } | { ok: fals
     // went. The probe is bounded and contains no secrets — only names and
     // counts — so it is safe to surface in plain logs.
     log(`token probe: tables=${JSON.stringify(probe.tables)}`);
+    log(`token probe: itemTableRows=${probe.itemTableRows}`);
+    log(
+      `token probe: candidateDbStats=${JSON.stringify(probe.candidateDbStats)}`,
+    );
     log(
       `token probe: itemTableSuspectKeys=${JSON.stringify(
         probe.itemTableSuspectKeys,

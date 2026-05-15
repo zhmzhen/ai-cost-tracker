@@ -2,6 +2,36 @@
 
 All notable changes to AI Cost Tracker for Cursor are documented here.
 
+## 0.4.11
+
+### Added
+
+- Probe now reports two new signals so we can detect the case where
+  `findStateDb()` picks the wrong DB:
+  - `itemTableRows`: row count of `ItemTable` in the DB we opened.
+    A freshly initialised Cursor state.vscdb has dozens of rows even
+    before sign-in, so 0 or a single-digit value strongly suggests we
+    are looking at a stale or empty leftover DB.
+  - `candidateDbStats`: `stat()` of every candidate state.vscdb path
+    the resolver knows about (size + mtime). If the first existing
+    candidate is much smaller or much older than a later one, that
+    is exactly the symptom of `findStateDb()` short-circuiting on a
+    stale file before reaching the real one.
+
+### Background
+
+The 0.4.10 probe on the developer machine showed
+`mainDb jwtCount=0` and `wal jwtCount=0` even though the SQL path
+returned a valid token from `ItemTable.cursorAuth/accessToken`. That
+tells us SQLite stores the value with a leading record-format byte
+that breaks a literal `eyJ`-anchored byte scan — i.e. the WAL
+byte-scan fallback shipped in 0.4.6 is not as load-bearing as
+hoped. We have not removed it (it still passes synthetic repros and
+covers the legitimate WAL-stale case) but we now know it cannot be
+the primary recovery path. The new fields move the next debugging
+step from "byte-scan everything" to "check which DB we are even
+reading".
+
 ## 0.4.10
 
 ### Added

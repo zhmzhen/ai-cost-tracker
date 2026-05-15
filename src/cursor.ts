@@ -232,9 +232,28 @@ export interface ReadAccessTokenResult {
   probe?: TokenProbe;
 }
 
+export interface CandidateDbStat {
+  path: string;
+  exists: boolean;
+  // File size in bytes (only meaningful when exists=true). Helps spot a
+  // stale 0-byte or tiny DB that's masking a real one further down the
+  // candidate list.
+  size: number;
+  // Unix ms; -1 if missing. Used to spot an obviously old DB.
+  mtime: number;
+}
+
 export interface TokenProbe {
   // All table names that exist in the main state.vscdb file.
   tables: string[];
+  // ItemTable row count in the DB we ultimately read. 0 strongly suggests
+  // we are looking at the wrong DB (a freshly initialised state.vscdb has
+  // tens to hundreds of rows even before login).
+  itemTableRows: number | null;
+  // stat() of every candidate state.vscdb path. Surfaces the case where
+  // findStateDb() picked the first existing file even though it was empty
+  // or stale, while a healthier DB lived further down the candidate list.
+  candidateDbStats: CandidateDbStat[];
   // ItemTable keys whose prefix matches a small allow-list (cursor*, auth*,
   // workos*, session*, token*). Values are never included.
   itemTableSuspectKeys: string[];
@@ -286,6 +305,7 @@ export async function readAccessTokenDetailed(
   let suspectKeys: string[] = [];
   let diskKvSuspectKeys: string[] = [];
   let diskKvHasJwt = false;
+  let itemTableRows: number | null = null;
   try {
     db = new SQL.Database(buf);
   } catch {
@@ -337,6 +357,7 @@ export async function readAccessTokenDetailed(
       suspectKeys = listSuspectItemTableKeys(db);
       diskKvSuspectKeys = listSuspectKeysInTable(db, "cursorDiskKV", "key");
       diskKvHasJwt = cursorDiskKVHasJwt(db);
+      itemTableRows = countItemTableRows(db);
     } finally {
       db.close();
     }
@@ -368,6 +389,7 @@ export async function readAccessTokenDetailed(
           suspectKeys,
           diskKvSuspectKeys,
           diskKvHasJwt,
+          itemTableRows,
         ),
       };
     }
@@ -385,6 +407,7 @@ export async function readAccessTokenDetailed(
       suspectKeys,
       diskKvSuspectKeys,
       diskKvHasJwt,
+      itemTableRows,
     ),
   };
 }
@@ -617,11 +640,14 @@ function buildProbe(
   suspectKeys: string[],
   diskKvSuspectKeys: string[],
   diskKvHasJwt: boolean,
+  itemTableRows: number | null,
 ): TokenProbe {
   const main = probeJwts(mainBytes);
   const wal = probeJwts(walBytes);
   return {
     tables,
+    itemTableRows,
+    candidateDbStats: statCandidateDbs(),
     itemTableSuspectKeys: suspectKeys,
     cursorDiskKVSuspectKeys: diskKvSuspectKeys,
     cursorDiskKVHasJwt: diskKvHasJwt,
@@ -631,6 +657,41 @@ function buildProbe(
     walJwtSamplePrefix: wal.samplePrefix,
     storageJsonKeys: readStorageJsonKeys(dbPath),
   };
+}
+
+/**
+ * stat() every candidate state.vscdb the resolver knows about. The point
+ * is to surface "we picked the first existing path but it's a 0-byte
+ * leftover" — without this we keep retrying SELECTs against a DB that
+ * was never going to contain auth state.
+ */
+function statCandidateDbs(): CandidateDbStat[] {
+  return candidateUserDirs().map((dir) => {
+    const p = path.join(dir, "globalStorage", "state.vscdb");
+    try {
+      const st = fs.statSync(p);
+      return {
+        path: p,
+        exists: true,
+        size: st.size,
+        mtime: st.mtimeMs,
+      };
+    } catch {
+      return { path: p, exists: false, size: 0, mtime: -1 };
+    }
+  });
+}
+
+/** Cheap "is this DB even being used?" signal. Returns null on failure. */
+function countItemTableRows(db: Database): number | null {
+  try {
+    const res = db.exec("SELECT COUNT(*) FROM ItemTable");
+    if (!res.length) return null;
+    const v = res[0].values[0]?.[0];
+    return typeof v === "number" ? v : Number(v) || 0;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -661,6 +722,7 @@ export async function runTokenProbe(): Promise<
   let suspectKeys: string[] = [];
   let diskKvSuspectKeys: string[] = [];
   let diskKvHasJwt = false;
+  let itemTableRows: number | null = null;
   const cursorAuthKeys: string[] = [];
   try {
     db = new SQL.Database(buf);
@@ -673,6 +735,7 @@ export async function runTokenProbe(): Promise<
       suspectKeys = listSuspectItemTableKeys(db);
       diskKvSuspectKeys = listSuspectKeysInTable(db, "cursorDiskKV", "key");
       diskKvHasJwt = cursorDiskKVHasJwt(db);
+      itemTableRows = countItemTableRows(db);
       try {
         const res = db.exec(
           "SELECT key FROM ItemTable WHERE key LIKE 'cursorAuth%'",
@@ -701,6 +764,7 @@ export async function runTokenProbe(): Promise<
       suspectKeys,
       diskKvSuspectKeys,
       diskKvHasJwt,
+      itemTableRows,
     ),
   };
 }
