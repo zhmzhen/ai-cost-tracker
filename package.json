@@ -100,8 +100,10 @@
     "@types/node": "^20",
     "@types/sql.js": "^1.4.9",
     "@types/vscode": "^1.80.0",
+    "@vitest/coverage-v8": "^4.1.6",
     "@vscode/vsce": "^3.2.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "vitest": "^4.1.6"
   },
   "repository": {
     "type": "git",

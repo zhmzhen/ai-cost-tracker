@@ -14,13 +14,16 @@ jobs:
         # Run the suite on Linux (fast, primary) and Windows (where the
         # actual reported failures happen — ERR_FS_FILE_TOO_LARGE,
         # EBUSY on the state DB, etc.).
-        os: [ubuntu-latest, windows-latest]
+        # Pin Windows to 2022 to avoid the silent windows-latest →
+        # windows-2025-vs2026 redirection scheduled for 2026-06-15.
+        os: [ubuntu-latest, windows-2022]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: "20"
           cache: npm
       - run: npm ci
       - run: npm run compile
       - run: npm run test
+        shell: bash
