@@ -58,7 +58,7 @@ export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context;
   logger = vscode.window.createOutputChannel("AI Cost Tracker");
   context.subscriptions.push(logger);
-  log("activate: starting (version 0.4.6)");
+  log("activate: starting (version 0.4.7)");
 
   // Create the status bar item FIRST and unconditionally. Anything below that
   // throws (sql.js wasm path, command registration, etc.) must not be allowed
@@ -133,6 +133,17 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   });
   safeRegister(context, "aiCostTracker.showLogs", () => logger.show(true));
+  safeRegister(context, "aiCostTracker.forceReread", async () => {
+    // Diagnostic-only: clear the cached JWT so the next refresh re-runs the
+    // full lookup pipeline (SQL SELECT → WAL byte-scan). Useful when
+    // verifying that the WAL fallback actually rescues a token on a machine
+    // where the cached path normally hides the issue. Not used by happy-path
+    // flows; safe to leave registered.
+    await extensionContext.globalState.update(TOKEN_STATE_KEY, undefined);
+    log("forceReread: cached token cleared; triggering fresh refresh");
+    logger.show(true);
+    await refresh(true);
+  });
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {

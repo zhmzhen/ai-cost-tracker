@@ -11,5 +11,8 @@ node_modules/**
 !node_modules/sql.js/LICENSE
 !node_modules/sql.js/dist/sql-wasm.js
 dist/**
+dist-vsix/**
+scripts/**
+.gitattributes
 .commit-msg-*.txt
 !media/**

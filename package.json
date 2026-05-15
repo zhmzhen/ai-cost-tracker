@@ -2,7 +2,7 @@
   "name": "ai-cost-tracker",
   "displayName": "AI Cost Tracker for Cursor",
   "description": "Zero-config status-bar widget that shows Cursor monthly cost and quota. Install and forget — no extra CLI, no PATH setup.",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "publisher": "zhmzhen",
   "author": {
     "name": "zhmzhen"
@@ -72,6 +72,10 @@
       {
         "command": "aiCostTracker.showLogs",
         "title": "AI Cost Tracker: Show logs"
+      },
+      {
+        "command": "aiCostTracker.forceReread",
+        "title": "AI Cost Tracker: Force re-read state DB"
       }
     ]
   },

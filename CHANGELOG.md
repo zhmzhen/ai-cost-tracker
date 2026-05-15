@@ -2,6 +2,38 @@
 
 All notable changes to AI Cost Tracker for Cursor are documented here.
 
+## 0.4.7
+
+### Fixed
+
+- The 0.4.6 byte-scan fallback would throw `ERR_STRING_TOO_LONG` if invoked
+  on a `state.vscdb` larger than ~512 MB, because Node's string upper bound
+  is 2^29 - 16 characters and the scan called `Buffer.toString("latin1")` on
+  the entire file. Real Cursor DBs routinely run from 2 GB to 3+ GB. The
+  scan is now chunked into 64 MB slices with 8 KB overlap, which both fits
+  the JS string limit and guarantees no JWT or `cursorAuth/accessToken`
+  marker is split across the slice boundary.
+- The fallback no longer attempts to byte-scan the main `state.vscdb` file.
+  If the token were present in the main file the SQL SELECT would already
+  have returned it; scanning a multi-GB file again wasted memory and CPU
+  for no additional coverage. Only the (much smaller) `state.vscdb-wal`
+  sidecar is scanned, which is the real source of the missing rows.
+
+### Added
+
+- New command `AI Cost Tracker: Force re-read state DB` clears the cached
+  JWT in `globalState` and triggers an immediate refresh. Intended for
+  reproducing the WAL fallback path on developer machines (where the
+  cached path normally hides whether SQL or WAL recovered the token) and
+  for asking testers to capture fresh diagnostics without uninstalling.
+- `scripts/reproduce-token-lookup.cjs` runs the same code path against a
+  real `state.vscdb`, prints `source=sql|wal|none`, key list, and JWT
+  prefix. `scripts/reproduce-wal-fallback.cjs` builds a synthetic DB whose
+  main file has no auth row but whose WAL sidecar contains a valid JWT,
+  and asserts the fallback returns `source=wal`. Both scripts are used to
+  validate the chunked scan on local data without disturbing the user's
+  Cursor instance.
+
 ## 0.4.6
 
 ### Fixed

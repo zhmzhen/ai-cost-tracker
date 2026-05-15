@@ -298,21 +298,16 @@ export async function readAccessTokenDetailed(
   // that Cursor is still running and the freshly written token still lives
   // in the SQLite WAL sidecar — sql.js loads only the main DB bytes and
   // cannot apply the WAL, so any rows written after the last checkpoint are
-  // invisible to the SELECT above. Fall back to a byte scan of both the
-  // main file and the WAL sidecar to find the JWT directly.
-  const scanInputs: Array<{ name: string; bytes: Buffer | null }> = [
-    { name: dbPath, bytes: buf },
-    { name: `${dbPath}-wal`, bytes: readIfExists(`${dbPath}-wal`) },
-  ];
-  for (const { bytes } of scanInputs) {
-    if (!bytes) continue;
-    const tok = scanRawForJwt(bytes);
+  // invisible to the SELECT above. Fall back to a byte scan of the WAL
+  // sidecar to find the JWT directly. We intentionally do NOT scan the main
+  // DB byte stream: if the token were present in the main file the SQL
+  // SELECT would already have returned it, and the main DB is regularly
+  // multiple GB which is too large to bytes-scan cheaply.
+  const walBytes = readIfExists(`${dbPath}-wal`);
+  if (walBytes) {
+    const tok = scanRawForJwt(walBytes);
     if (tok) {
-      return {
-        token: tok,
-        cursorAuthKeys: sqlKeys,
-        source: "wal",
-      };
+      return { token: tok, cursorAuthKeys: sqlKeys, source: "wal" };
     }
   }
 
@@ -347,43 +342,90 @@ function parseJwtToToken(raw: string): AccessToken | null {
  * the next plausible JWT (three base64url segments separated by `.`). This
  * is a byte-level heuristic, not a SQLite parse, so it has to validate the
  * candidate string through ``parseJwtToToken`` before trusting it.
+ *
+ * The scan is chunked so we never allocate a JS string larger than ~64 MB.
+ * Node strings have a hard upper bound of about 512 MB and a Cursor main DB
+ * can exceed that several times over; even though we only call this on the
+ * WAL sidecar today, keeping the routine chunk-safe avoids surprises if a
+ * future caller hands it a larger buffer.
  */
+const SCAN_CHUNK_BYTES = 64 * 1024 * 1024;
+// 8 KB overlap: SQLite pages are at most 64 KB; a JWT plus the
+// `cursorAuth/accessToken` key prefix is well under 8 KB, so this is enough
+// to never split a match across chunks. Keep the constant generous because
+// a missed token here means a regression to "session token not found".
+const SCAN_OVERLAP_BYTES = 8 * 1024;
+
 export function scanRawForJwt(bytes: Buffer): AccessToken | null {
-  // Decoding the entire buffer as latin1 keeps every byte as a 1:1 character
-  // and is much cheaper than UTF-8 decoding for multi-GB Cursor DBs.
-  const text = bytes.toString("latin1");
   const jwtCharset = "A-Za-z0-9_\\-";
-  const jwtPattern = new RegExp(
+  const jwtRe = new RegExp(
     `[${jwtCharset}]+\\.[${jwtCharset}]+\\.[${jwtCharset}]+`,
     "g",
   );
+  const keyRe = /cursorAuth[\/\.]accessToken/g;
 
-  // Strategy 1: look for `cursorAuth/accessToken` (or the dot variant) and
-  // consume the next JWT-shaped run that appears after it. SQLite stores the
-  // key and value back-to-back in the page payload, so the value is normally
-  // within a few hundred bytes of the key string.
-  const keyPattern = /cursorAuth[\/\.]accessToken/g;
-  let keyMatch: RegExpExecArray | null;
-  while ((keyMatch = keyPattern.exec(text)) !== null) {
-    jwtPattern.lastIndex = keyMatch.index + keyMatch[0].length;
-    const m = jwtPattern.exec(text);
-    if (!m) continue;
-    if (m.index - keyMatch.index > 4096) continue;
-    const tok = parseJwtToToken(m[0]);
-    if (tok) return tok;
-  }
+  // Strategy 1: locate the auth key and read the JWT that immediately
+  // follows it. SQLite stores key and value back-to-back in the page
+  // payload, so the value is normally within a few hundred bytes of the key
+  // string. This is the high-precision path; we run it first.
+  let stash: AccessToken | null = null;
+  forEachChunk(bytes, (text) => {
+    keyRe.lastIndex = 0;
+    let keyMatch: RegExpExecArray | null;
+    while ((keyMatch = keyRe.exec(text)) !== null) {
+      jwtRe.lastIndex = keyMatch.index + keyMatch[0].length;
+      const m = jwtRe.exec(text);
+      if (!m) continue;
+      if (m.index - keyMatch.index > 4096) continue;
+      const tok = parseJwtToToken(m[0]);
+      if (tok) {
+        stash = tok;
+        return true; // stop early
+      }
+    }
+    return false;
+  });
+  if (stash) return stash;
 
-  // Strategy 2: no nearby key was found. Some WAL frames split the key off
-  // from the value across the page boundary. Walk every JWT-shaped run in
-  // the buffer and accept the first one whose payload decodes as a Cursor
-  // access token (has `sub` and a future-ish `exp`).
-  jwtPattern.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = jwtPattern.exec(text)) !== null) {
-    const tok = parseJwtToToken(m[0]);
-    if (tok) return tok;
+  // Strategy 2: some WAL frames split the key off from the value across the
+  // page boundary. Walk every JWT-shaped run and accept the first one whose
+  // payload decodes as a Cursor access token (has `sub` and a future-ish
+  // `exp`). Higher false-positive risk, so it is only used as fallback.
+  forEachChunk(bytes, (text) => {
+    jwtRe.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = jwtRe.exec(text)) !== null) {
+      const tok = parseJwtToToken(m[0]);
+      if (tok) {
+        stash = tok;
+        return true;
+      }
+    }
+    return false;
+  });
+  return stash;
+}
+
+/**
+ * Yield latin1-decoded slices of ``bytes`` no larger than SCAN_CHUNK_BYTES,
+ * with SCAN_OVERLAP_BYTES of overlap between consecutive chunks so a match
+ * is never split across slice boundaries. ``cb`` returning true stops
+ * iteration early.
+ */
+function forEachChunk(bytes: Buffer, cb: (text: string) => boolean): void {
+  if (bytes.length <= SCAN_CHUNK_BYTES) {
+    cb(bytes.toString("latin1"));
+    return;
   }
-  return null;
+  let start = 0;
+  while (start < bytes.length) {
+    const end = Math.min(start + SCAN_CHUNK_BYTES, bytes.length);
+    const slice = bytes.subarray(start, end).toString("latin1");
+    const stop = cb(slice);
+    if (stop) return;
+    if (end === bytes.length) return;
+    start = end - SCAN_OVERLAP_BYTES;
+  }
 }
 
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
