@@ -21,7 +21,7 @@ In Cursor or VS Code: **Extensions** → search for **AI Cost Tracker for Cursor
 
 Alternatively, install the VSIX file by hand: **Cmd/Ctrl + Shift + P** → **Extensions: Install from VSIX…**.
 
-The extension runs in the active extension host. In a local window it runs locally; in Remote-WSL or Remote-SSH it runs in the remote host — both work without any extra configuration, because the extension reads Cursor's own state database in-process (via [sql.js](https://github.com/sql-js/sql.js) compiled to WebAssembly).
+The extension prefers Cursor's local UI extension host, including Remote-WSL and Remote-SSH windows. That lets it read the local Cursor state database where your session token lives, without installing a helper on each remote environment.
 
 ## Settings
 
@@ -57,7 +57,7 @@ Earlier 0.x versions depended on a Python `tt` CLI that the user had to install 
 
 ```bash
 npm install
-npm run package      # -> dist-vsix/ai-cost-tracker-0.4.1.vsix
+npm run package      # -> dist-vsix/ai-cost-tracker-0.4.2.vsix
 ```
 
 ## License
