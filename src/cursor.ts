@@ -950,8 +950,10 @@ function errnoOf(e: unknown): string {
 
 /**
  * Decode a JWT string into an AccessToken; null if shape/payload is wrong.
+ *
+ * @internal Exported for unit tests only.
  */
-function parseJwtToToken(raw: string): AccessToken | null {
+export function parseJwtToToken(raw: string): AccessToken | null {
   if (raw.split(".").length !== 3) return null;
   const payload = decodeJwtPayload(raw);
   if (!payload) return null;
@@ -1054,7 +1056,8 @@ function forEachChunk(bytes: Buffer, cb: (text: string) => boolean): void {
   }
 }
 
-function decodeJwtPayload(token: string): Record<string, unknown> | null {
+/** @internal Exported for unit tests only. */
+export function decodeJwtPayload(token: string): Record<string, unknown> | null {
   const parts = token.split(".");
   if (parts.length !== 3) {
     return null;
@@ -1132,7 +1135,8 @@ class HttpError extends Error {
 
 // ----------------------------- assembly ------------------------------------
 
-interface AggregatedUsageResponse {
+/** @internal Exported for unit tests only. */
+export interface AggregatedUsageResponse {
   totalCostCents?: number;
   totalInputTokens?: number;
   totalOutputTokens?: number;
@@ -1148,7 +1152,8 @@ interface AggregatedUsageResponse {
   }>;
 }
 
-interface UsageSummaryResponse {
+/** @internal Exported for unit tests only. */
+export interface UsageSummaryResponse {
   billingCycleStart?: string;
   billingCycleEnd?: string;
   membershipType?: string;
@@ -1157,7 +1162,8 @@ interface UsageSummaryResponse {
   teamUsage?: { pooled?: RawQuota };
 }
 
-interface RawQuota {
+/** @internal Exported for unit tests only. */
+export interface RawQuota {
   enabled?: boolean;
   used?: number;
   limit?: number;
@@ -1169,7 +1175,8 @@ function toInt(v: unknown): number {
   return Number.isFinite(n) ? Math.trunc(n) : 0;
 }
 
-function toQuota(raw: RawQuota | undefined): Quota | null {
+/** @internal Exported for unit tests only. */
+export function toQuota(raw: RawQuota | undefined): Quota | null {
   if (!raw) return null;
   const limit =
     typeof raw.limit === "number" && Number.isFinite(raw.limit) ? raw.limit : null;
@@ -1183,7 +1190,8 @@ function toQuota(raw: RawQuota | undefined): Quota | null {
   return { enabled: Boolean(raw.enabled), used, limit, remaining, usedPct };
 }
 
-function assemble(
+/** @internal Exported for unit tests only. */
+export function assemble(
   agg: AggregatedUsageResponse,
   summ: UsageSummaryResponse,
 ): MonthSummary {
