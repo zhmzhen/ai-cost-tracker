@@ -28,7 +28,7 @@ import {
   FetchStatus,
   MonthSummary,
   Quota,
-  acquireAccessToken,
+  acquireAccessTokenDetailed,
   describeError,
   fetchMonthSummaryWithToken,
   setWasmDirectory,
@@ -58,7 +58,7 @@ export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context;
   logger = vscode.window.createOutputChannel("AI Cost Tracker");
   context.subscriptions.push(logger);
-  log("activate: starting (version 0.4.4)");
+  log("activate: starting (version 0.4.5)");
 
   // Create the status bar item FIRST and unconditionally. Anything below that
   // throws (sql.js wasm path, command registration, etc.) must not be allowed
@@ -107,18 +107,28 @@ export function activate(context: vscode.ExtensionContext): void {
   safeRegister(context, "aiCostTracker.showDetails", () => showDetails());
   safeRegister(context, "aiCostTracker.show", async () => {
     statusBar.show();
-    // statusBar.show() only flips the extension-side visibility flag. If the
-    // user previously hid the item from the status bar context menu, VS Code's
-    // per-id hidden list still overrides our flag and the user sees no change.
-    // The platform does not expose an API to clear that hidden list, so the
-    // best we can do is guide the user to the right click target.
+    // statusBar.show() only flips the extension-side visibility flag. Two
+    // independent workbench-side things can still hide it from the user:
+    //   1. The status bar as a whole is disabled in View → Appearance.
+    //   2. The per-id hidden list (the status bar context menu) was used to
+    //      hide this specific item.
+    // Neither has an "unhide by id" API, so we expose actions that map to the
+    // two recovery flows users actually have: toggle the entire status bar,
+    // or open the logs to see what happened.
     const choice = await vscode.window.showInformationMessage(
-      "AI Cost Tracker: if the status bar item is still hidden, right-click " +
-        "any empty area of the status bar and tick \"AI Cost Tracker\" in the " +
-        "list. Cursor remembers that choice per profile.",
+      "AI Cost Tracker: status bar item is set to visible. If you still see " +
+        "nothing, the whole status bar may be turned off (View → Appearance → " +
+        "Status Bar), or this specific item may be hidden via the status bar " +
+        "context menu — right-click any empty area of the status bar and tick " +
+        "\"AI Cost Tracker\".",
+      "Toggle status bar",
       "Show logs",
     );
-    if (choice === "Show logs") {
+    if (choice === "Toggle status bar") {
+      await vscode.commands.executeCommand(
+        "workbench.action.toggleStatusBarVisibility",
+      );
+    } else if (choice === "Show logs") {
       logger.show(true);
     }
   });
@@ -195,7 +205,22 @@ async function getToken(): Promise<{ ok: true; token: AccessToken } | { ok: fals
     return { ok: true, token: valid };
   }
 
-  const fresh = await acquireAccessToken();
+  const fresh = await acquireAccessTokenDetailed();
+  // Always log diagnostics: scanned candidates, the file we actually used, and
+  // which cursorAuth keys lived in that DB. This is the answer to "I'm signed
+  // in but the extension still says no token" — we can tell whether we hit
+  // the wrong state.vscdb or the right one with the wrong key.
+  log(`token lookup: dbPath=${fresh.diagnostics.dbPath ?? "<none>"}`);
+  log(
+    `token lookup: candidate userDirs=${JSON.stringify(
+      fresh.diagnostics.candidateUserDirs,
+    )}`,
+  );
+  log(
+    `token lookup: cursorAuthKeys=${JSON.stringify(
+      fresh.diagnostics.cursorAuthKeys,
+    )}`,
+  );
   if (!fresh.ok) {
     return { ok: false, error: describeError(fresh.error) };
   }

@@ -2,6 +2,34 @@
 
 All notable changes to AI Cost Tracker for Cursor are documented here.
 
+## 0.4.5
+
+### Fixed
+
+- "I installed it but nothing shows up" sometimes meant the user had turned
+  off the whole status bar via `View → Appearance → Status Bar`, not just
+  hidden this single item. `AI Cost Tracker: Show status bar item` now offers
+  a `Toggle status bar` action that runs
+  `workbench.action.toggleStatusBarVisibility`, covering that case directly.
+- Token lookup is more resilient. The extension now scans every
+  `cursorAuth*` key in the state database and tries the first one whose
+  value parses as a JWT, instead of only looking for the literal key
+  `cursorAuth/accessToken`. This avoids spurious "session token not found"
+  errors on Cursor builds that use a slightly different key shape.
+
+### Added
+
+- `AI Cost Tracker: Show logs` now reports, on every refresh, the candidate
+  Cursor user directories that were scanned, which `state.vscdb` ended up
+  being used, and which `cursorAuth*` keys lived in it (key names only — no
+  token values are ever logged). That answers "is the extension looking at
+  the wrong DB or the right one with the wrong key?" without a developer
+  build.
+- README Troubleshooting section now distinguishes the two failure modes
+  ("status bar disabled entirely" vs "this item hidden via context menu")
+  and documents the `CURSOR_USER_DIR` / `CURSOR_GLOBAL_STORAGE` overrides
+  for portable / custom Cursor installs.
+
 ## 0.4.4
 
 ### Fixed

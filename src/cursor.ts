@@ -215,12 +215,26 @@ export function validateCachedToken(token: AccessToken | undefined): AccessToken
   return token;
 }
 
+export interface ReadAccessTokenResult {
+  token: AccessToken | null;
+  // For diagnostics only: which `cursorAuth/*` keys were present in the DB.
+  // Never includes values, so it is safe to log.
+  cursorAuthKeys: string[];
+}
+
 export async function readAccessToken(dbPath: string): Promise<AccessToken | null> {
+  const res = await readAccessTokenDetailed(dbPath);
+  return res.token;
+}
+
+export async function readAccessTokenDetailed(
+  dbPath: string,
+): Promise<ReadAccessTokenResult> {
   let buf: Buffer;
   try {
     buf = fs.readFileSync(dbPath);
   } catch {
-    return null;
+    return { token: null, cursorAuthKeys: [] };
   }
 
   const SQL = await loadSqlJs();
@@ -228,30 +242,49 @@ export async function readAccessToken(dbPath: string): Promise<AccessToken | nul
   try {
     db = new SQL.Database(buf);
   } catch {
-    return null;
+    return { token: null, cursorAuthKeys: [] };
   }
 
   try {
+    // Pull every key under cursorAuth/* so we can both pick the right one and
+    // emit a key list to the diagnostic log when nothing matched. Cursor has
+    // historically stored the token under `cursorAuth/accessToken`, but newer
+    // builds may use a slightly different key shape; scanning the prefix lets
+    // us survive that without another release.
     const res = db.exec(
-      "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'",
+      "SELECT key, value FROM ItemTable WHERE key LIKE 'cursorAuth%'",
     );
-    if (!res.length || !res[0].values.length) {
-      return null;
+    if (!res.length) {
+      return { token: null, cursorAuthKeys: [] };
     }
-    const raw = res[0].values[0][0];
-    if (typeof raw !== "string" || raw.split(".").length !== 3) {
-      return null;
+    const rows = res[0].values as Array<[unknown, unknown]>;
+    const keys: string[] = [];
+    for (const [k] of rows) {
+      if (typeof k === "string") keys.push(k);
     }
-    const payload = decodeJwtPayload(raw);
-    if (!payload) {
-      return null;
+
+    // Prefer the canonical key, then fall back to anything in the namespace
+    // whose value parses as a JWT.
+    const preferred = ["cursorAuth/accessToken", "cursorAuth.accessToken"];
+    const ordered = [
+      ...rows.filter(([k]) => typeof k === "string" && preferred.includes(k as string)),
+      ...rows.filter(([k]) => typeof k === "string" && !preferred.includes(k as string)),
+    ];
+
+    for (const [, rawValue] of ordered) {
+      if (typeof rawValue !== "string") continue;
+      if (rawValue.split(".").length !== 3) continue;
+      const payload = decodeJwtPayload(rawValue);
+      if (!payload) continue;
+      const sub = typeof payload.sub === "string" ? payload.sub : "";
+      const exp = Number(payload.exp);
+      if (!sub || !Number.isFinite(exp)) continue;
+      return {
+        token: { token: rawValue, sub, expiresAt: exp },
+        cursorAuthKeys: keys,
+      };
     }
-    const sub = typeof payload.sub === "string" ? payload.sub : "";
-    const exp = Number(payload.exp);
-    if (!sub || !Number.isFinite(exp)) {
-      return null;
-    }
-    return { token: raw, sub, expiresAt: exp };
+    return { token: null, cursorAuthKeys: keys };
   } finally {
     db.close();
   }
@@ -428,24 +461,53 @@ export type TokenResult =
  * The extension layer should cache the returned token and only call this when
  * the cached one is missing or expired.
  */
+export interface AcquireDiagnostics {
+  // The on-disk path of the state DB we ultimately read, if any.
+  dbPath: string | null;
+  // All candidate User directories that were considered, in order.
+  candidateUserDirs: string[];
+  // Keys observed under `cursorAuth*` in the DB (no values).
+  cursorAuthKeys: string[];
+}
+
+export type TokenResultWithDiagnostics =
+  | { ok: true; token: AccessToken; diagnostics: AcquireDiagnostics }
+  | { ok: false; error: FetchError; diagnostics: AcquireDiagnostics };
+
 export async function acquireAccessToken(): Promise<TokenResult> {
+  const r = await acquireAccessTokenDetailed();
+  if (r.ok) return { ok: true, token: r.token };
+  return { ok: false, error: r.error };
+}
+
+export async function acquireAccessTokenDetailed(): Promise<TokenResultWithDiagnostics> {
+  const candidates = candidateUserDirs();
   const db = findStateDb();
+  const baseDiag: AcquireDiagnostics = {
+    dbPath: db,
+    candidateUserDirs: candidates,
+    cursorAuthKeys: [],
+  };
   if (!db) {
-    return { ok: false, error: "state_db_not_found" };
+    return { ok: false, error: "state_db_not_found", diagnostics: baseDiag };
   }
-  let token: AccessToken | null;
+  let detailed: ReadAccessTokenResult;
   try {
-    token = await readAccessToken(db);
+    detailed = await readAccessTokenDetailed(db);
   } catch {
-    return { ok: false, error: "invalid_token" };
+    return { ok: false, error: "invalid_token", diagnostics: baseDiag };
   }
-  if (!token) {
-    return { ok: false, error: "no_access_token" };
+  const diag: AcquireDiagnostics = {
+    ...baseDiag,
+    cursorAuthKeys: detailed.cursorAuthKeys,
+  };
+  if (!detailed.token) {
+    return { ok: false, error: "no_access_token", diagnostics: diag };
   }
-  if (token.expiresAt < Date.now() / 1000 + 60) {
-    return { ok: false, error: "token_expired" };
+  if (detailed.token.expiresAt < Date.now() / 1000 + 60) {
+    return { ok: false, error: "token_expired", diagnostics: diag };
   }
-  return { ok: true, token };
+  return { ok: true, token: detailed.token, diagnostics: diag };
 }
 
 /**
@@ -505,7 +567,12 @@ export function describeError(err: FetchError): string {
     case "state_db_not_found":
       return "Could not find Cursor's state database. Are you signed in to Cursor on this machine?";
     case "no_access_token":
-      return "Cursor session token not found in the local state database. Please sign in to Cursor.";
+      return (
+        "Cursor session token not found in the local state database. " +
+        "Try signing out and back in to Cursor on this machine, then run " +
+        "`AI Cost Tracker: Refresh now`. Run `AI Cost Tracker: Show logs` to see " +
+        "which state.vscdb was inspected and which `cursorAuth/*` keys it contained."
+      );
     case "token_expired":
       return "Cursor session token is expired. Restart Cursor or sign back in so it refreshes the token.";
     case "invalid_token":
