@@ -57,7 +57,7 @@ Earlier 0.x versions depended on a Python `tt` CLI that the user had to install 
 
 ```bash
 npm install
-npm run package      # → dist/ai-cost-tracker-0.4.0.vsix
+npm run package      # -> dist-vsix/ai-cost-tracker-0.4.1.vsix
 ```
 
 ## License

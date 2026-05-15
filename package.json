@@ -2,7 +2,7 @@
   "name": "ai-cost-tracker",
   "displayName": "AI Cost Tracker for Cursor",
   "description": "Zero-config status-bar widget that shows Cursor monthly cost and quota. Install and forget — no extra CLI, no PATH setup.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "publisher": "zhmzhen",
   "author": {
     "name": "zhmzhen"
@@ -72,7 +72,7 @@
     "vscode:prepublish": "npm run copy-wasm && npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "npm run copy-wasm && npm run compile && vsce package --out dist/"
+    "package": "npm run copy-wasm && npm run compile && mkdir -p dist-vsix && vsce package --out dist-vsix/ai-cost-tracker-$npm_package_version.vsix"
   },
   "dependencies": {
     "sql.js": "^1.13.0"
