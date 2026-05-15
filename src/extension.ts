@@ -59,7 +59,7 @@ export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context;
   logger = vscode.window.createOutputChannel("AI Cost Tracker");
   context.subscriptions.push(logger);
-  log("activate: starting (version 0.4.9)");
+  log("activate: starting (version 0.4.10)");
 
   // Create the status bar item FIRST and unconditionally. Anything below that
   // throws (sql.js wasm path, command registration, etc.) must not be allowed
@@ -155,6 +155,12 @@ export function activate(context: vscode.ExtensionContext): void {
           p.itemTableSuspectKeys,
         )}`,
       );
+      log(
+        `runProbe: cursorDiskKVSuspectKeys=${JSON.stringify(
+          p.cursorDiskKVSuspectKeys,
+        )}`,
+      );
+      log(`runProbe: cursorDiskKVHasJwt=${p.cursorDiskKVHasJwt}`);
       log(
         `runProbe: mainDb jwtCount=${p.mainDbJwtCount} samplePrefix=${
           p.mainDbJwtSamplePrefix ?? "<none>"
@@ -281,6 +287,12 @@ async function getToken(): Promise<{ ok: true; token: AccessToken } | { ok: fals
         probe.itemTableSuspectKeys,
       )}`,
     );
+    log(
+      `token probe: cursorDiskKVSuspectKeys=${JSON.stringify(
+        probe.cursorDiskKVSuspectKeys,
+      )}`,
+    );
+    log(`token probe: cursorDiskKVHasJwt=${probe.cursorDiskKVHasJwt}`);
     log(
       `token probe: mainDb jwtCount=${probe.mainDbJwtCount} samplePrefix=${
         probe.mainDbJwtSamplePrefix ?? "<none>"

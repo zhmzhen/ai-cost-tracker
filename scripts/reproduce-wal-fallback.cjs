@@ -142,6 +142,58 @@ async function main() {
     })`,
   );
 
+  // Synthesise the "auth lives in cursorDiskKV" hypothesis: same shape as
+  // the moved-auth DB above, plus a cursorDiskKV(key, value) table whose
+  // `auth/accessToken` row holds a real JWT. Probe must report the suspect
+  // key list and `cursorDiskKVHasJwt: true`. This is the exact signal that
+  // would unlock a 0.4.10 fallback that reads from cursorDiskKV directly.
+  const diskKv = path.join(tmp, "diskkv.vscdb");
+  db = new SQL.Database();
+  db.run("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)");
+  db.run("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB)");
+  db.run("INSERT INTO cursorDiskKV VALUES (?, ?)", [
+    "auth/accessToken",
+    jwt,
+  ]);
+  db.run("INSERT INTO cursorDiskKV VALUES (?, ?)", [
+    "cursor/sessionMeta",
+    JSON.stringify({ unrelated: true }),
+  ]);
+  fs.writeFileSync(diskKv, Buffer.from(db.export()));
+  db.close();
+  const e = await cursor.readAccessTokenDetailed(diskKv);
+  check(
+    "diskKv DB → probe lists cursorDiskKV suspect keys",
+    e.probe &&
+      e.probe.tables.includes("cursorDiskKV") &&
+      e.probe.cursorDiskKVSuspectKeys.includes("auth/accessToken"),
+    `(diskKvKeys=${JSON.stringify(e.probe && e.probe.cursorDiskKVSuspectKeys)})`,
+  );
+  check(
+    "diskKv DB → probe finds JWT inside cursorDiskKV row value",
+    e.probe && e.probe.cursorDiskKVHasJwt === true,
+    `(cursorDiskKVHasJwt=${e.probe && e.probe.cursorDiskKVHasJwt})`,
+  );
+
+  // Regression: the tightened JWT regex should ignore dotted base64-ish
+  // identifiers like Cursor's `reactiveStorage.workbench.foo.bar`. Without
+  // the `eyJ` anchor the probe was reporting 100+ false positives.
+  const noisy = path.join(tmp, "noisy.vscdb");
+  db = new SQL.Database();
+  db.run("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)");
+  db.run("INSERT INTO ItemTable VALUES (?, ?)", [
+    "reactive.foo",
+    "reactiveStorage.workbench.layout.Panel123.sidebar456",
+  ]);
+  fs.writeFileSync(noisy, Buffer.from(db.export()));
+  db.close();
+  const f = await cursor.readAccessTokenDetailed(noisy);
+  check(
+    "noisy DB → JWT regex no longer matches dotted identifiers",
+    f.probe && f.probe.mainDbJwtCount === 0,
+    `(mainDbJwtCount=${f.probe && f.probe.mainDbJwtCount})`,
+  );
+
   fs.rmSync(tmp, { recursive: true, force: true });
   if (failed > 0) {
     console.error(`\n${failed} check(s) failed`);

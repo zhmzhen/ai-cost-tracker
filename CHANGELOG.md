@@ -2,6 +2,33 @@
 
 All notable changes to AI Cost Tracker for Cursor are documented here.
 
+## 0.4.10
+
+### Added
+
+- Probe now inspects the `cursorDiskKV` table that newer Cursor builds
+  ship alongside `ItemTable`. Two new fields surface in the output:
+  - `cursorDiskKVSuspectKeys`: keys whose prefix is one of
+    `cursor`/`auth`/`workos`/`session`/`token`/`user`. Values are not
+    included, so the list is safe to log.
+  - `cursorDiskKVHasJwt`: true iff at least one row's value parses as a
+    JWT we would accept (via the same `parseJwtToToken` the SQL path
+    uses). Detected by trying JSON-parse first then a regex over the raw
+    text, so it works whether Cursor stores the token as a plain string,
+    an object with an `accessToken` field, or a UTF-8 BLOB.
+- Column names for `cursorDiskKV` are discovered at runtime via
+  `PRAGMA table_info`, not hard-coded, so a future column-rename
+  in Cursor's schema does not silently break the probe.
+
+### Fixed
+
+- The JWT-shape regex used by the probe was matching any dotted
+  base64-ish identifier — e.g. `reactiveStorage.workbench.X.Y` —
+  producing 100+ false positives in `mainDb jwtCount` and
+  `wal jwtCount`. The regex now anchors the first segment to `eyJ`
+  (which is how base64-encoded `{"…"}` JSON headers always start), so
+  only real JWT candidates are counted.
+
 ## 0.4.9
 
 ### Added
