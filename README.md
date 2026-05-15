@@ -97,6 +97,29 @@ npm install
 npm run package      # -> dist-vsix/ai-cost-tracker-0.4.13.vsix
 ```
 
+## Testing
+
+The cursor.ts module ships with a Vitest suite that covers every
+documented failure mode of the token lookup pipeline — including the
+ones we paid for in production:
+
+- 2 GiB+ `state.vscdb` (the libuv `ERR_FS_FILE_TOO_LARGE` boundary
+  that emily hit). A sparse file is generated on-the-fly so the
+  test runs in ~3 s without writing 2 GiB to disk.
+- Windows exclusive-lock simulation for the `copyFile` fallback.
+- WAL byte-scan recovery when the SQL SELECT misses.
+- `cursorDiskKV` probing for newer Cursor schemas.
+- Regression for the dotted-identifier false positives in the JWT
+  regex.
+
+```bash
+npm test            # one-shot
+npm run test:watch  # while iterating
+npm run test:coverage
+```
+
+CI runs the same suite on Ubuntu and Windows for every push and PR.
+
 ## License
 
 MIT.

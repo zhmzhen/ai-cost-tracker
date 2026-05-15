@@ -851,7 +851,8 @@ function readIfExists(p: string): Buffer | null {
  */
 const READ_CHUNK_BYTES = 256 * 1024 * 1024;
 
-function readDbWithFallback(
+/** @internal Exported for unit tests only. Not part of the public API. */
+export function readDbWithFallback(
   p: string,
 ): { buf: Buffer | null; error: string | null; fallback: boolean } {
   const direct = chunkedReadFile(p);
@@ -904,7 +905,8 @@ function readDbWithFallback(
  * single I/O never exceeds libuv's INT32_MAX limit. Returns the errno on
  * failure so the caller can log it.
  */
-function chunkedReadFile(
+/** @internal Exported for unit tests only. Not part of the public API. */
+export function chunkedReadFile(
   p: string,
 ): { buf: Buffer | null; error: string | null } {
   let fd: number | null = null;
