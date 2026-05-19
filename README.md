@@ -15,6 +15,13 @@ One status bar item, always visible:
 
 It reuses your existing Cursor login (the session token already on disk) and talks only to `https://cursor.com`. There is nothing to sign up for, nothing to paste, no API key.
 
+## Supported editor
+
+AI Cost Tracker is built for Cursor's billing dashboard and local session
+storage. It can also run in VS Code-compatible editors such as Windsurf when
+Cursor is installed and signed in on the same machine, because the extension
+reads Cursor's local state database.
+
 ## Install
 
 In Cursor or VS Code: **Extensions** → search for **AI Cost Tracker for Cursor** → **Install**. That's it.
